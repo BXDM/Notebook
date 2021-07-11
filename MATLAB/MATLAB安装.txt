@@ -1,0 +1,4 @@
+需要安装的组件
+    
+1.symbolic math toolbox
+用于符号运算
