@@ -2,5 +2,10 @@
 <project version="4">
   <component name="VcsDirectoryMappings">
     <mapping directory="" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Python 数字图像处理/photo_retouching/models/Beholder-GAN" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Python 数字图像处理/photo_retouching/models/DeblurGAN" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Python 数字图像处理/photo_retouching/models/generative_inpainting" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Python 数字图像处理/photo_retouching/models/openpose" vcs="Git" />
+    <mapping directory="$PROJECT_DIR$/Python 数字图像处理/photo_retouching/models/pix2pix" vcs="Git" />
   </component>
 </project>
