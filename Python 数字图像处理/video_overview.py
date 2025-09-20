@@ -334,7 +334,7 @@ if __name__ == "__main__":
             print(f"✓ 拼图已保存为 {output_path}")
 
             # 显示结果
-            # show_image(output_path)
+            show_image(output_path)
 
             # 打印时间戳信息
             print("\n成功提取的帧时间戳:")
