@@ -1,8 +1,10 @@
 import cv2
 import numpy as np
 
+from scripts.face import nostril_parts_mask
 
-# 人脸框内不做祛痘的区域（相对坐标 x0, y0, x1, y1）：眉眼、鼻孔、嘴
+
+# 没有关键点时，人脸框内不做祛痘的区域（相对坐标 x0, y0, x1, y1）：眉眼、鼻孔、嘴
 _FACE_EXCLUDE = [(0.0, 0.12, 1.0, 0.52),
                  (0.30, 0.52, 0.70, 0.74), (0.22, 0.68, 0.78, 0.95)]
 
@@ -23,9 +25,14 @@ def remove_blemishes(image, hard_mask, faces, scale, sensitivity=1.0):
 
     # 只看完全处于皮肤内部的点，避开眉毛、眼睛、鼻孔、发际线等边缘
     inner = cv2.erode(hard_mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k * 2 + 1, k * 2 + 1)))
-    for x, y, w, h in faces:
-        for rx0, ry0, rx1, ry1 in _FACE_EXCLUDE:
-            inner[int(y + ry0 * h):int(y + ry1 * h), int(x + rx0 * w):int(x + rx1 * w)] = 0
+    for f in faces:
+        x, y, w, h = f.box
+        if f.points is not None:
+            inner[f.feature_mask(image.shape, grow=k) > 0] = 0
+            inner[nostril_parts_mask(f, image.shape, grow=k // 2) > 0] = 0
+        else:
+            for rx0, ry0, rx1, ry1 in _FACE_EXCLUDE:
+                inner[int(y + ry0 * h):int(y + ry1 * h), int(x + rx0 * w):int(x + rx1 * w)] = 0
     vals = blackhat[inner > 0]
     if vals.size == 0:
         return image, np.zeros(image.shape[:2], np.uint8)

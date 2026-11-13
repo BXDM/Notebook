@@ -18,7 +18,8 @@ from scripts.frequency_separation import frequency_separation
 from scripts.preprocess import preprocess_image
 from scripts.save_image import save_image
 from scripts.sharpening import sharpen_image
-from scripts.skin_mask import detect_faces, feature_scale, skin_mask
+from scripts.face import detect_faces
+from scripts.skin_mask import feature_scale, skin_mask
 from scripts.skin_smoothing import skin_smoothing
 from scripts.warping import slim_face
 from scripts.whitening import whiten_skin
@@ -27,7 +28,7 @@ EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
 
 def process_image(image, opts):
-    faces = detect_faces(image)
+    faces = detect_faces(image, use_landmarks=not opts.no_landmarks)
     scale = feature_scale(image, faces)
     hard, soft = skin_mask(image, faces)
 
@@ -46,7 +47,7 @@ def process_image(image, opts):
     # 瘦脸（最后做，前面各步用的掩码都对应变形前的位置）
     image = slim_face(image, faces, opts.slim)
 
-    info = {"faces": len(faces), "spots": cv2.connectedComponents(spots)[0] - 1}
+    info = {"faces": len(faces), "landmarks": any(f.points is not None for f in faces), "spots": cv2.connectedComponents(spots)[0] - 1}
     return image, (soft * 255).astype(np.uint8), info
 
 
@@ -71,9 +72,10 @@ def main():
     ap.add_argument("--even", type=float, default=0.5, help="匀肤强度 0~1（默认 0.5）")
     ap.add_argument("--smooth", type=float, default=0.7, help="磨皮强度 0~1（默认 0.7）")
     ap.add_argument("--whiten", type=float, default=0.2, help="美白强度 0~1（默认 0.2）")
-    ap.add_argument("--slim", type=float, default=0.0, help="瘦脸强度 0~1（默认 0 关闭，位置是估计的）")
+    ap.add_argument("--slim", type=float, default=0.0, help="瘦脸强度 0~1（默认 0 关闭）")
     ap.add_argument("--color", type=float, default=0.3, help="白平衡/对比度校正强度 0~1（默认 0.3）")
     ap.add_argument("--sharpen", type=float, default=0.5, help="锐化强度（默认 0.5）")
+    ap.add_argument("--no-landmarks", action="store_true", help="不用 mediapipe 关键点，只用 Haar 人脸框")
     ap.add_argument("--max-side", type=int, help="长边超过该值时先等比缩小")
     ap.add_argument("--compare", action="store_true", help="额外保存左右对比图 *_compare.jpg")
     ap.add_argument("--save-mask", action="store_true", help="额外保存皮肤掩码 *_mask.png")
@@ -96,7 +98,8 @@ def main():
             save_image(np.hstack([original, result]), f"{stem}_compare.jpg")
         if opts.save_mask:
             save_image(mask, f"{stem}_mask.png")
-        print(f"{os.path.basename(src)}: 人脸 {info['faces']}，修复斑点 {info['spots']}，"
+        mode = "关键点" if info["landmarks"] else "Haar"
+        print(f"{os.path.basename(src)}: 人脸 {info['faces']}（{mode}），修复斑点 {info['spots']}，"
               f"{time.time() - t0:.1f}s -> {dst}")
 
 
