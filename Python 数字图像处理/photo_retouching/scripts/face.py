@@ -29,6 +29,8 @@ MODEL_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file
 _HAAR = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
 _options = None         # FaceLandmarkerOptions，懒加载；False 表示不可用
 _parts = {}             # 部位名 -> 关键点下标
+# 两只眼的下眼睑关键点（从外眼角到内眼角）
+_LOWER_LIDS = [[33, 7, 163, 144, 145, 153, 154, 155, 133], [263, 249, 390, 373, 374, 380, 381, 382, 362]]
 
 
 @dataclass
@@ -48,6 +50,22 @@ class Face:
             k = int(grow) * 2 + 1
             mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
         return mask
+
+    def under_eye_mask(self, shape):
+        """眼袋/黑眼圈区域：下眼睑往下约 0.1 倍脸宽的带状区，0~1 float32（已羽化）。"""
+        pts = self.points
+        face_w = np.linalg.norm(pts[454] - pts[234])
+        eye_line = pts[263] - pts[33]
+        down = np.array([-eye_line[1], eye_line[0]], np.float32)
+        down /= np.linalg.norm(down) + 1e-6
+        if np.dot(down, pts[152] - pts[33]) < 0:  # 让方向指向下巴
+            down = -down
+        mask = np.zeros(shape[:2], np.uint8)
+        for lid in _LOWER_LIDS:
+            p = pts[lid]
+            band = np.vstack([p + down * face_w * 0.015, p[::-1] + down * face_w * 0.11])
+            cv2.fillPoly(mask, [band.astype(np.int32)], 255)
+        return cv2.GaussianBlur(mask.astype(np.float32) / 255, (0, 0), face_w / 40)
 
     def feature_mask(self, shape, grow=0):
         """眉、眼、嘴（不含鼻）。"""

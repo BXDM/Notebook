@@ -1,2 +1,4 @@
 models/*.task
+models/*.onnx
 output/
+debug/

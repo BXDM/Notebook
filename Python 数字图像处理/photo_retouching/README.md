@@ -1,38 +1,62 @@
 # photo_retouching 人像精修
 
-OpenCV 人像精修流水线，CPU 上 1000×1500 的图约 1.5 秒（首次加载 mediapipe 另需 2~3 秒）。
+OpenCV 人像精修流水线。CPU 上 1000×1500 的图约 2 秒（首次加载 mediapipe 另需 2~3 秒）。
 
-人脸用 mediapipe FaceLandmarker 的 478 个关键点定位（模型 `models/face_landmarker.task` 约 3.7 MB，
-缺失时自动下载）；没装 mediapipe、下载失败或加 `--no-landmarks` 时退回 OpenCV Haar 人脸框。
+两个可选模型，缺失时自动下载到 `models/`，不可用时自动降级：
+
+| 模型 | 用途 | 降级方案 |
+|---|---|---|
+| mediapipe FaceLandmarker（478 点，3.7 MB） | 人脸定位、五官/鼻孔/眼袋位置、瘦脸推点 | OpenCV Haar 人脸框（`--no-landmarks`） |
+| BiSeNet 人脸分割 ResNet18 ONNX（53 MB，[yakhyo/face-parsing](https://github.com/yakhyo/face-parsing)） | 像素级区分脸、鼻、耳、脖子、五官、头发、衣物 | 自适应肤色模型（`--no-parsing`） |
 
 ## 用法
 
 ```bash
-pip install -r requirements.txt   # mediapipe 可选，不装也能跑
+pip install -r requirements.txt   # mediapipe、onnxruntime 可选
 
 python main.py                          # 处理 data/raw/ 下所有图片，输出到 output/
 python main.py photo.jpg                # 单张，输出 output/photo_retouched.jpg
-python main.py photo.jpg -o out.jpg --compare --save-mask
-python main.py data/raw --smooth 0.9 --whiten 0.4 --slim 0.5
+python main.py photo.jpg --compare      # 额外输出前后对比图
+python main.py photo.jpg --debug        # 质量检查：各阶段输出、蒙版、瑕疵分类、100% 局部对比 -> debug/photo/
+python main.py data/raw --smooth 0.9 --freckles 0.5 --moles --slim 0.5
 ```
 
 ## 处理步骤
 
 | 顺序 | 步骤 | 参数（默认） | 实现 |
 |---|---|---|---|
-| 0 | 人脸检测 + 皮肤掩码 | `--no-landmarks` | 在脸部轮廓内（去掉五官）采样 Cr/Cb 建自适应肤色模型，只保留与人脸相连的皮肤；轮廓内阴影补进来，眉、眼、嘴挖掉不磨 |
-| 1 | 祛痘祛痣 | `--blemish 1.0` | 皮肤内 blackhat 找暗色小圆点，`cv2.inpaint` 修补；按关键点排除眉眼、鼻翼鼻孔、嘴 |
-| 2 | 色彩校正 | `--color 0.3` | 灰度世界白平衡 + 全局色阶拉伸 |
-| 3 | 高低频分离匀肤 | `--even 0.5` | 低频层做保边平滑（去色斑、明暗不均），高频纹理原样加回 |
-| 4 | 磨皮 | `--smooth 0.7` | 双边滤波，保留 15% 细节防塑料感，按羽化掩码混合 |
-| 5 | 美白 | `--whiten 0.2` | LAB 亮度通道对数曲线提亮 |
-| 6 | 锐化 | `--sharpen 0.5` | USM，只作用于非皮肤区域（眼睛、眉毛、头发） |
-| 7 | 瘦脸 | `--slim 0`（关闭） | 沿关键点下颌线两侧 5 对推点向鼻尖局部液化 |
+| 0 | 人脸 + 蒙版 | `--no-landmarks` `--no-parsing` | 分割得到脸/脖子/耳朵皮肤和五官、头发保护区；胸口手臂等身体皮肤用脸部采样的肤色模型补充，须与脖子相连 |
+| 1 | 瑕疵分类修复 | `--blemish 1.0` `--freckles 0` `--moles` | 暗点（L 黑帽）+ 红点（a 顶帽）→ 按大小、明暗差、红度差分为痘/色斑/雀斑/痣；痘全修、色斑减淡 70%、雀斑和痣默认保留。修复用 inpaint 补低频 + 邻近干净皮肤的纹理。眼周、眉间、嘴角、鼻侧不检测；处于阴影/褶皱中的不算 |
+| 2 | 色彩校正 | `--color 0.3` | 灰度世界白平衡 + 全局色阶 |
+| 3 | 匀肤（色度） | `--even 0.5` | 只在 Lab 的 a/b 上做低频均衡：泛红、色斑、眼下发青 |
+| 4 | Dodge & Burn | `--dodge-burn 0.6` `--eye 0.5` | 只改亮度 L：小幅明暗斑驳拉平，大幅的立体阴影（鼻梁、颧骨、下颌）保留；眼下单独提亮黑眼圈 |
+| 5 | 多尺度磨皮 | `--smooth 0.7` `--grain 0.6` | 皮肤拆成高/中/低频，主要削弱中频（痘印、细褶皱）；高频按相机噪声收缩，颗粒去掉、毛孔保留；鼻子、身体削弱更少 |
+| 6 | 美白 | `--whiten 0.2` | LAB 亮度对数曲线 |
+| 7 | 锐化 | `--sharpen 0.5` | USM，只作用于非皮肤（眼、眉、发） |
+| 8 | 瘦脸 | `--slim 0`（关闭） | 沿关键点下颌线两侧 5 对推点向鼻尖局部液化 |
 
-强度都设为 0 即可关闭对应步骤。`--compare` 额外输出前后对比图，`--save-mask` 输出皮肤掩码，便于调参。
+强度设为 0 即关闭对应步骤。
+
+## 质量检查工具
+
+- `--debug [DIR]`：每张图一个目录，含 `00_original` ~ `08_slim` 各阶段图、`mask_overlay.jpg`（绿=皮肤，蓝=脸部，红=保护区）、
+  `blemishes.jpg`（红=痘，橙=色斑，蓝=雀斑，紫=痣；粗圈已处理、细圈保留）、`crops_100pct.png`（脸颊、鼻翼、发际线、眼周、
+  嘴角、下颌的 100% 前后对比）、`report.txt`（参数和每个瑕疵的数值）。
+- `tools/skin_metrics.py 原图 结果...`：脸部皮肤三个尺度的亮度起伏（细节/中频/大尺度），比较不同版本或参数。
+- `tools/blemish_bench.py 人像...`：在干净皮肤上随机合成痘、色斑、雀斑、痣，输出检出与分类的混淆表。
+
+当前基线（3 张网络人像）：
+
+| | 细节 | 中频 | 大尺度 |
+|---|---|---|---|
+| 原图 a | 1.29 | 4.02 | 8.94 |
+| 结果 a | 1.16 | 2.70 | 8.06 |
+
+合成瑕疵：痘 32/36，色斑 15/24，痣 5/5，浅雀斑 2/22（低于检测阈值，默认也不处理），额外检出 13/87。
 
 ## 局限
 
-- 没检出人脸时退回固定 YCrCb 阈值，可能把木头、沙子等近肤色背景也磨掉。
-- 祛痘只处理明显的深色小点，雀斑、细纹交给匀肤和磨皮弱化，不会完全去除；眉眼、鼻翼、嘴附近的痣不处理。
-- Haar 模式（无关键点）只认正脸，瘦脸位置靠人脸框估计，强度建议不超过 0.6。
+- 测试照片只有 3 张网图，阈值未经真实原片验证；需要用真实拍摄原片跑 `--debug` 建立基线。
+- 祛痘不检测眼周、眉间、嘴角、鼻侧，这些位置的痣和痘不会处理；浅雀斑基本检测不到。
+- 内部各步仍是 8-bit，不支持 16-bit TIFF / ICC / RAW。
+- 没有人脸时退回固定 YCrCb 阈值，可能误磨近肤色背景；Haar 模式只认正脸。
