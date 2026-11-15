@@ -2,3 +2,4 @@ opencv-python>=4.8
 numpy
 mediapipe>=0.10   # 可选：人脸关键点
 onnxruntime>=1.16  # 可选：人脸语义分割
+Pillow             # 可选：读 EXIF（auto.py 报告里的 ISO、快门）
