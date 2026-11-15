@@ -135,8 +135,7 @@ def skin_mask(image, faces, use_parsing=True):
         seed = np.zeros((h, w), np.uint8)
         for x, y, bw, bh in (f.box for f in faces):
             seed[y + bh // 4:min(y + bh * 3 // 2, h), x + bw // 4:x + bw * 3 // 4] = 255
-        if not faces:
-            seed[:] = 255
+        # 没有人脸时不猜皮肤：整图肤色模型会把路面、树干、衣服都算进去，皮肤类步骤全部跳过
         skin_hard = _keep_connected(hard, seed, (scale / 6) ** 2)
         # 脸部 = 脸部轮廓（或人脸框内切椭圆）∩ 皮肤
         face_hard = np.zeros((h, w), np.uint8)

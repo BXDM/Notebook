@@ -115,8 +115,28 @@ def _haar_faces(image):
     return [Face(tuple(int(v) for v in f)) for f in faces]
 
 
+def _tiles(h, w):
+    """整图 + 边长为短边 3/4 的方块（步长半块）。mediapipe 先把输入缩到很小再找脸，
+    广角环境人像里脸只占画面 6%~10%，整图检测不到，裁成小块后脸相对变大才能检出。"""
+    tiles = [(0, 0, w, h)]
+    if max(h, w) <= 2000:
+        return tiles
+    t = int(min(h, w) * 0.75)
+    step = t // 2
+    xs = sorted({*range(0, w - t, step), w - t})
+    ys = sorted({*range(0, h - t, step), h - t})
+    return tiles + [(x, y, t, t) for y in ys for x in xs]
+
+
+def _iou(a, b):
+    ix = max(0, min(a[0] + a[2], b[0] + b[2]) - max(a[0], b[0]))
+    iy = max(0, min(a[1] + a[3], b[1] + b[3]) - max(a[1], b[1]))
+    inter = ix * iy
+    return inter / (a[2] * a[3] + b[2] * b[3] - inter + 1e-6)
+
+
 def detect_faces(image, use_landmarks=True):
-    """返回 [Face, ...]。"""
+    """返回 [Face, ...]。大图分块检测再合并，块边缘被切到的脸丢弃（相邻块里有完整的）。"""
     options = _load_options() if use_landmarks else False
     if not options:
         return _haar_faces(image)
@@ -124,21 +144,29 @@ def detect_faces(image, use_landmarks=True):
     import mediapipe as mp
     from mediapipe.tasks.python import vision
     h, w = image.shape[:2]
-    rgb = np.ascontiguousarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB))
+    rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    faces = []
     # 每次用 with 创建并关闭；常驻实例在解释器退出时 close() 会报错
     with _quiet_stderr(), vision.FaceLandmarker.create_from_options(options) as landmarker:
-        result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb))
-    faces = []
-    for lms in result.face_landmarks:
-        pts = np.array([(p.x * w, p.y * h) for p in lms], np.float32)
-        oval = pts[_parts["oval"]]
-        x0, y0 = oval.min(axis=0)
-        x1, y1 = oval.max(axis=0)
-        # 换算成与 Haar 框大致相同的框（Haar 框比脸部轮廓略宽、上沿在额头中部）
-        bw = (x1 - x0) * 1.2
-        cx = (x0 + x1) / 2
-        by = y0 + (y1 - y0) * 0.08
-        faces.append(Face((int(cx - bw / 2), int(by), int(bw), int(bw)), pts))
+        for tx, ty, tw, th in _tiles(h, w):
+            tile = np.ascontiguousarray(rgb[ty:ty + th, tx:tx + tw])
+            result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=tile))
+            for lms in result.face_landmarks:
+                pts = np.array([(tx + p.x * tw, ty + p.y * th) for p in lms], np.float32)
+                oval = pts[_parts["oval"]]
+                x0, y0 = oval.min(axis=0)
+                x1, y1 = oval.max(axis=0)
+                cut = ((x0 < tx + 2 and tx > 0) or (y0 < ty + 2 and ty > 0)
+                       or (x1 > tx + tw - 2 and tx + tw < w) or (y1 > ty + th - 2 and ty + th < h))
+                if cut:
+                    continue
+                # 换算成与 Haar 框大致相同的框（Haar 框比脸部轮廓略宽、上沿在额头中部）
+                bw = (x1 - x0) * 1.2
+                cx = (x0 + x1) / 2
+                by = y0 + (y1 - y0) * 0.08
+                box = (int(cx - bw / 2), int(by), int(bw), int(bw))
+                if all(_iou(box, f.box) < 0.3 for f in faces):
+                    faces.append(Face(box, pts))
     return faces
 
 

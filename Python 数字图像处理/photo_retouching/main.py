@@ -126,7 +126,10 @@ def main():
         if opts.debug:
             name = os.path.splitext(os.path.basename(src))[0]
             write_debug(opts.debug, name, stages, masks, blemishes, info["faces"], info["scale"], params)
-        mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
+        if not info["faces"]:
+            mode = "未检出，跳过皮肤处理"
+        else:
+            mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
         kinds = Counter(b.kind for b in blemishes if b.weight > 0)
         fixed = "、".join(f"{k} {v}" for k, v in kinds.items()) or "无"
         print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），处理瑕疵 {fixed}，"
