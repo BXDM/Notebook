@@ -11,6 +11,7 @@ import numpy as np
 
 from scripts.face import nostril_parts_mask
 from scripts.face_parsing import parse_faces
+from scripts.person_seg import segment_person
 
 
 @dataclass
@@ -22,6 +23,7 @@ class Masks:
     protect: np.ndarray     # 0/255 uint8，五官、鼻孔、头发：任何修复都不碰
     nose: np.ndarray        # 0~1 float32，鼻子区域（毛孔明显，磨皮减弱）
     method: str             # "parsing" / "color"
+    tone: np.ndarray = None # 0~1 float32，皮肤 + 脸上的五官（嘴、眼、鼻孔），供美白这类整体调色
 
 
 def feature_scale(image, faces):
@@ -101,11 +103,21 @@ def skin_mask(image, faces, use_parsing=True):
             protect |= nostril_parts_mask(f, image.shape, grow=f.box[2] // 80)
 
     parsed = parse_faces(image, faces) if use_parsing else None
+    features = protect.copy()  # 五官 + 鼻孔，不含头发
+    # 人像多类分割给皮肤一个上限：衣服、头发一律不算；分割区域外（离人很远）也不算
+    person = segment_person(image, faces) if use_parsing else None
+    allowed = None
+    if person is not None:
+        allowed = ((person["body"] + person["face"]) > 0.5).astype(np.uint8) * 255
+        allowed = cv2.dilate(allowed, _ellipse(scale / 20)) > 0
+        allowed &= (person["cloth"] < 0.5) & (person["hair"] < 0.5)
     if parsed is not None:
         method = "parsing"
         face_hard = (parsed["face"] > 0.5).astype(np.uint8) * 255
         head_skin = face_hard | (((parsed["ears"] > 0.5) | (parsed["neck"] > 0.5)).astype(np.uint8) * 255)
-        protect |= ((parsed["features"] > 0.4) | (parsed["hair"] > 0.5)).astype(np.uint8) * 255
+        protect |= (parsed["features"] > 0.4).astype(np.uint8) * 255
+        features = protect.copy()
+        protect |= (parsed["hair"] > 0.5).astype(np.uint8) * 255
 
         # 身体皮肤（胸口、肩、手臂）：用脸部皮肤采样的肤色模型，排除分割认定的头发、衣物、饰品，
         # 且必须与脸/脖子相连（种子区放大一圈，跨过项链、颈带这类细的遮挡）
@@ -113,7 +125,10 @@ def skin_mask(image, faces, use_parsing=True):
         sample[protect > 0] = 0
         dist, lo = _color_model(image, faces, sample)
         not_skin = (parsed["hair"] > 0.5) | (parsed["features"] > 0.4) | (parsed["cloth"] > 0.5)
-        body = ((dist < 9.0) & (y_chan > lo * 0.6) & ~not_skin).astype(np.uint8) * 255
+        body = (dist < 9.0) & (y_chan > lo * 0.6) & ~not_skin
+        if allowed is not None:
+            body &= allowed
+        body = body.astype(np.uint8) * 255
         body = _clean(body, scale)
         body = _keep_connected(body, cv2.dilate(head_skin, _ellipse(scale / 5)), (scale / 6) ** 2)
         skin_hard = head_skin | body
@@ -131,6 +146,8 @@ def skin_mask(image, faces, use_parsing=True):
         else:
             hard = _fixed_ycrcb(image)
         hard &= (y_chan > 40) & (y_chan < 250)
+        if allowed is not None:
+            hard &= allowed
         hard = _clean(hard.astype(np.uint8) * 255, scale)
         seed = np.zeros((h, w), np.uint8)
         for x, y, bw, bh in (f.box for f in faces):
@@ -160,4 +177,7 @@ def skin_mask(image, faces, use_parsing=True):
     hard_protect = protect > 0
     skin[hard_protect] *= 0.0
     face[hard_protect] *= 0.0
-    return Masks(skin, skin_hard, face, face_hard, protect, nose, method)
+    # 整体调色若避开五官，嘴唇、鼻孔周围会出现一圈没提亮的硬边，所以五官一起调；头发仍然不碰
+    tone_hard = skin_hard | features
+    tone = cv2.GaussianBlur(tone_hard.astype(np.float32) / 255.0, (0, 0), feather)
+    return Masks(skin, skin_hard, face, face_hard, protect, nose, method, tone)

@@ -31,5 +31,10 @@ def dodge_burn(image, masks, faces, scale, strength=0.5, eye=0.5):
     gain = np.where(corr > 0, strength, strength * 0.6)  # 压暗比提亮保守，保留自然高光
     gain = gain * (1 - eye_mask) + np.where(corr > 0, eye, 0.0) * eye_mask
 
-    lab[..., 0] = L + corr * gain * masks.face
+    delta = corr * gain
+    # 五官（嘴、鼻孔，以及保护区比五官大出的一圈皮肤）不参与估计，但要跟着周围皮肤一起变，
+    # 否则提亮后保护区边缘会留一圈没变亮的硬边；用周围皮肤的校正量插值填进去
+    fill = np.clip(masks.tone - masks.skin, 0, 1) if masks.tone is not None else 0.0
+    delta_fill = masked_blur(delta, region, scale / 30)
+    lab[..., 0] = L + delta * masks.face + delta_fill * fill
     return from_lab(lab)

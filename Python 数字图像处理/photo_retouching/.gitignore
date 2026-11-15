@@ -2,3 +2,5 @@ models/*.task
 models/*.onnx
 output/
 debug/
+models/*.tflite
+__pycache__/

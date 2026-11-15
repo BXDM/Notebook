@@ -10,6 +10,7 @@ import argparse
 import os
 import time
 from collections import Counter
+from dataclasses import fields, replace
 
 import numpy as np
 
@@ -30,38 +31,94 @@ from scripts.whitening import whiten_skin
 EXTS = (".jpg", ".jpeg", ".png", ".bmp", ".webp")
 
 
-def process_image(image, opts):
-    """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。"""
+def person_roi(shape, faces):
+    """皮肤处理只需要人物周围：每张脸左右 3.5 倍脸宽、上 1.5 倍到下 7.5 倍（比人像分割区域多留半个脸宽给羽化）。"""
+    h, w = shape[:2]
+    x0, y0, x1, y1 = w, h, 0, 0
+    for f in faces:
+        x, y, bw, _ = f.box
+        cx = x + bw / 2
+        x0, x1 = min(x0, cx - 3.5 * bw), max(x1, cx + 3.5 * bw)
+        y0, y1 = min(y0, y - 1.5 * bw), max(y1, y + 7.5 * bw)
+    return int(max(x0, 0)), int(max(y0, 0)), int(min(x1, w)), int(min(y1, h))
+
+
+def _shift_face(f, dx, dy):
+    x, y, bw, bh = f.box
+    pts = None if f.points is None else f.points - np.float32([dx, dy])
+    return replace(f, box=(x - dx, y - dy, bw, bh), points=pts)
+
+
+def _embed_masks(masks, shape, roi):
+    """把人物区域的蒙版放回整图尺寸（调试图、--save-mask 用）。"""
+    x0, y0, x1, y1 = roi
+    full = {}
+    for k in fields(masks):
+        v = getattr(masks, k.name)
+        if isinstance(v, np.ndarray):
+            big = np.zeros(shape[:2], v.dtype)
+            big[y0:y1, x0:x1] = v
+            v = big
+        full[k.name] = v
+    return type(masks)(**full)
+
+
+def process_image(image, opts, full_masks=False):
+    """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。
+
+    皮肤类步骤只在人物区域（裁剪）上做再贴回，调色、锐化作用于整图；24MP 原图上人物通常只占一小块。
+    没有人脸时跳过所有皮肤步骤。
+    """
     faces = detect_faces(image, use_landmarks=not opts.no_landmarks)
     scale = feature_scale(image, faces)
-    masks = skin_mask(image, faces, use_parsing=not opts.no_parsing)
     stages = {"original": image}
+    h, w = image.shape[:2]
+    roi = person_roi(image.shape, faces) if faces else (0, 0, w, h)
+    x0, y0, x1, y1 = roi
+    sub_faces = [_shift_face(f, x0, y0) for f in faces]
+    masks = skin_mask(image[y0:y1, x0:x1], sub_faces, use_parsing=not opts.no_parsing)
+
+    def on_person(step):
+        out = image.copy()
+        if faces:
+            out[y0:y1, x0:x1] = step(image[y0:y1, x0:x1])
+        return out
 
     # 瑕疵分类修复
-    image, blemishes = remove_blemishes(image, masks, faces, scale, opts.blemish, opts.freckles, opts.moles)
+    blemishes = []
+
+    def fix(crop):
+        crop, found = remove_blemishes(crop, masks, sub_faces, scale, opts.blemish, opts.freckles, opts.moles)
+        blemishes.extend(replace(b, center=(b.center[0] + x0, b.center[1] + y0)) for b in found)
+        return crop
+    image = on_person(fix)
     stages["blemish"] = image
     # 色彩校正（放在磨皮前，避免放大被磨掉的颗粒）
     image = color_correct(image, opts.color)
     stages["color"] = image
     # 匀肤：色度低频均衡
-    image = frequency_separation(image, masks, scale, opts.even)
+    image = on_person(lambda c: frequency_separation(c, masks, scale, opts.even))
     stages["even"] = image
     # Dodge & Burn：亮度局部均衡、黑眼圈
-    image = dodge_burn(image, masks, faces, scale, opts.dodge_burn, opts.eye)
+    image = on_person(lambda c: dodge_burn(c, masks, sub_faces, scale, opts.dodge_burn, opts.eye))
     stages["dodge_burn"] = image
     # 多尺度磨皮
-    image = skin_smoothing(image, masks, scale, opts.smooth, opts.grain)
+    image = on_person(lambda c: skin_smoothing(c, masks, scale, opts.smooth, opts.grain))
     stages["smooth"] = image
     # 美白
-    image = whiten_skin(image, masks.skin, opts.whiten)
+    image = on_person(lambda c: whiten_skin(c, masks.tone, opts.whiten))
     stages["whiten"] = image
     # 锐化（只锐化非皮肤）
-    image = sharpen_image(image, masks.skin, scale, opts.sharpen)
+    skin_full = np.zeros((h, w), np.float32)
+    skin_full[y0:y1, x0:x1] = masks.skin
+    image = sharpen_image(image, skin_full, scale, opts.sharpen)
     stages["sharpen"] = image
     # 瘦脸（最后做，前面各步用的蒙版都对应变形前的位置）
-    image = slim_face(image, faces, opts.slim)
+    image = on_person(lambda c: slim_face(c, sub_faces, opts.slim))
     stages["slim"] = image
 
+    if full_masks:
+        masks = _embed_masks(masks, image.shape, roi)
     info = {"faces": faces, "scale": scale,
             "landmarks": any(f.points is not None for f in faces)}
     return image, masks, blemishes, stages, info
@@ -96,7 +153,7 @@ def main():
     ap.add_argument("--slim", type=float, default=0.0, help="瘦脸强度 0~1（默认 0 关闭）")
     ap.add_argument("--color", type=float, default=0.3, help="白平衡/对比度校正强度 0~1（默认 0.3）")
     ap.add_argument("--sharpen", type=float, default=0.5, help="锐化强度（默认 0.5）")
-    ap.add_argument("--no-parsing", action="store_true", help="不用人脸语义分割，只用肤色模型")
+    ap.add_argument("--no-parsing", action="store_true", help="不用人脸/人像语义分割，只用肤色模型")
     ap.add_argument("--no-landmarks", action="store_true", help="不用 mediapipe 关键点，只用 Haar 人脸框")
     ap.add_argument("--max-side", type=int, help="长边超过该值时先等比缩小")
     ap.add_argument("--compare", action="store_true", help="额外保存左右对比图 *_compare.jpg")
@@ -116,7 +173,8 @@ def main():
     for src, dst in jobs:
         t0 = time.time()
         original = preprocess_image(src, opts.max_side)
-        result, masks, blemishes, stages, info = process_image(original.copy(), opts)
+        result, masks, blemishes, stages, info = process_image(original.copy(), opts,
+                                                                  full_masks=bool(opts.debug or opts.save_mask))
         save_image(result, dst)
         stem = os.path.splitext(dst)[0]
         if opts.compare:
