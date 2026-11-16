@@ -170,14 +170,23 @@ def detect_faces(image, use_landmarks=True):
     return faces
 
 
-def nostril_parts_mask(face, shape, grow=0):
-    """鼻翼和鼻孔区域：鼻子关键点中位于鼻尖以下的部分。"""
+def nostril_parts_mask(face, shape, grow=0, image=None):
+    """鼻孔保护区。鼻尖以下的鼻子关键点圈出下半个鼻子；给了 image 时只保留其中明显比鼻子皮肤暗的像素
+    （鼻孔开口、鼻翼沟），鼻翼和鼻小柱的皮肤照常磨皮、祛痘。"""
     nose = face.points[_parts["nose"]]
     tip_y = face.points[4][1]
     low = nose[nose[:, 1] >= tip_y - (face.box[3] * 0.03)]
     mask = np.zeros(shape[:2], np.uint8)
     if len(low) >= 3:
         cv2.fillConvexPoly(mask, cv2.convexHull(low.astype(np.int32)), 255)
+    if image is not None and mask.any():
+        L = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)[..., 0]
+        whole = np.zeros(shape[:2], np.uint8)
+        cv2.fillConvexPoly(whole, cv2.convexHull(nose.astype(np.int32)), 255)
+        ref = float(np.median(L[whole > 0]))
+        dark = ((L < ref * 0.7) & (mask > 0)).astype(np.uint8) * 255
+        k = max(3, face.box[2] // 100) | 1
+        mask = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
     if grow > 0:
         k = int(grow) * 2 + 1
         mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))

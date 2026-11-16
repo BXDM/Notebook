@@ -12,6 +12,7 @@ import time
 from collections import Counter
 from dataclasses import fields, replace
 
+import cv2
 import numpy as np
 
 from scripts.blemish import remove_blemishes
@@ -63,6 +64,14 @@ def _embed_masks(masks, shape, roi):
     return type(masks)(**full)
 
 
+def whiten_amount(crop, masks, strength):
+    """美白按脸原本的亮度递减：脸部 L* 58 以下全额，70 以上不美白（本来就亮的脸再提会发白）。"""
+    if strength <= 0 or not (masks.face_hard > 0).any():
+        return strength
+    L = float(np.median(cv2.cvtColor(crop, cv2.COLOR_BGR2LAB)[..., 0][masks.face_hard > 0])) / 2.55
+    return strength * float(np.clip((70 - L) / 12, 0, 1))
+
+
 def process_image(image, opts, full_masks=False):
     """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。
 
@@ -94,7 +103,8 @@ def process_image(image, opts, full_masks=False):
     image = on_person(fix)
     stages["blemish"] = image
     # 色彩校正（放在磨皮前，避免放大被磨掉的颗粒）
-    image = color_correct(image, opts.color)
+    face_px = image[y0:y1, x0:x1][masks.face_hard > 0] if faces else None
+    image = color_correct(image, opts.color, face_px)
     stages["color"] = image
     # 匀肤：色度低频均衡
     image = on_person(lambda c: frequency_separation(c, masks, scale, opts.even))
@@ -106,7 +116,7 @@ def process_image(image, opts, full_masks=False):
     image = on_person(lambda c: skin_smoothing(c, masks, scale, opts.smooth, opts.grain))
     stages["smooth"] = image
     # 美白
-    image = on_person(lambda c: whiten_skin(c, masks.tone, opts.whiten))
+    image = on_person(lambda c: whiten_skin(c, masks.tone, whiten_amount(c, masks, opts.whiten)))
     stages["whiten"] = image
     # 锐化（只锐化非皮肤）
     skin_full = np.zeros((h, w), np.float32)

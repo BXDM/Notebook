@@ -100,7 +100,7 @@ def skin_mask(image, faces, use_parsing=True):
     for f in faces:
         if f.points is not None:
             protect |= f.feature_mask(image.shape, grow=f.box[2] // 60)
-            protect |= nostril_parts_mask(f, image.shape, grow=f.box[2] // 80)
+            protect |= nostril_parts_mask(f, image.shape, grow=f.box[2] // 80, image=image)
 
     parsed = parse_faces(image, faces) if use_parsing else None
     features = protect.copy()  # 五官 + 鼻孔，不含头发
