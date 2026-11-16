@@ -49,6 +49,13 @@ def read_exif(path):
         if isinstance(v, tuple):
             v = v[0]
         out[key] = v.strip() if isinstance(v, str) else float(v)
+    # 焦距换算成像素：焦平面分辨率（像素/英寸或/厘米）× 焦距；没有就用 35mm 等效焦距
+    fpx, unit, f35 = sub.get(0xA20E), sub.get(0xA210), sub.get(0xA405)
+    if "focal" in out and fpx:
+        per_mm = float(fpx) / {2: 25.4, 3: 10.0}.get(int(unit or 2), 25.4)
+        out["focal_px"] = out["focal"] * per_mm
+    elif f35:
+        out["focal35"] = float(f35)
     return out
 
 
