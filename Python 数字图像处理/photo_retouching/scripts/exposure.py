@@ -2,10 +2,12 @@
 
 在线性亮度的对数域里用导向滤波取“照明层”base（保边，避免灯旁光晕），只对 base 做色调映射，
 得到增益图 gain = curve(k·base) / base，再乘回线性 RGB，细节层原样保留。
-- k：曝光倍数。人像让脸部皮肤到目标 L（默认 58）；夜景、风景按中位亮度温和调整；最多 +2 档。
+- k：曝光倍数。人像让脸部皮肤到目标 L（默认 58）；没有人脸时只在高光不到 L 85（欠曝）时提亮，
+  到高光 L 92 为止，从不整体压暗；最多 +2 档。
 - curve：膝点以下恒等（不改变中间调对比），膝点以上用有理函数软肩把最亮的 base 收回到 1，
   所以提亮后路灯、招牌不会新增溢出。
 - 极暗处（夜空、阴影深处）增益逐渐回到 1，保留夜景的黑。
+- 大光比（白天室内、逆光，没有人脸）时另外提亮暗部，见 shadow_lift。
 导向滤波在长边约 1500 的缩小图上算系数再放大（fast guided filter），24MP 只需约 1 秒。
 """
 import cv2
@@ -67,12 +69,13 @@ def exposure_factor(an, target_L=58.0, strength=1.0):
         if an.subject_hi and k > 1 and k * an.subject_hi > 0.8:
             k = max(1.0, 0.8 / an.subject_hi)
             why += f"，受光面限制为 L {_L(k * an.subject):.0f}"
-    elif an.scene == "night":
-        k = float(np.clip(L_to_lin(28) / max(an.p50, 1e-4), 1.0, 2.0))
-        why = f"夜景中位 L {_L(an.p50):.0f}"
     else:
-        k = float(np.clip(L_to_lin(48) / max(an.p50, 1e-4), 0.8, 2.0))
-        why = f"中位 L {_L(an.p50):.0f}"
+        # 没有人脸：看最亮的部分有没有到位（同 Lightroom 自动白点），不看中位数——风景本来就有亮有暗。
+        # 高光不到 L 85 才算欠曝，提亮到高光 L 92 为止；高光已到位的照片是反差大而不是欠曝，
+        # 整体提亮只会挤压高光、整体压暗会发灰，不动，交给局部调整。永远不整体压暗。
+        hi_L = _L(an.p99)
+        k = float(np.clip(L_to_lin(92) / max(an.p99, 1e-4), 1.0, 2.0)) if hi_L < 85 else 1.0
+        why = f"高光 L {hi_L:.0f}" + ("，欠曝，提亮到高光 L 92" if k > 1 else "，已到位，不整体调亮暗")
     return k ** strength, why
 
 
@@ -81,7 +84,7 @@ def _L(y):
     return 116 * y ** (1 / 3) - 16 if y > 0.008856 else 903.3 * y
 
 
-def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5):
+def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5, shadows=1.0):
     """返回 (增益图 float32, 曝光倍数 k, 说明)。"""
     lin = to_linear(image)
     y = luminance(lin)
@@ -94,7 +97,33 @@ def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5):
     t = np.clip((base - 0.003) / (0.014 - 0.003), 0, 1)
     t = t * t * (3 - 2 * t)
     gain = 1 + (gain - 1) * t
+    lift, how = shadow_lift(base, an, strength * shadows)
+    if how:
+        gain = gain * lift
+        why += "；" + how
     return gain.astype(np.float32), k, why
+
+
+def shadow_lift(base, an, strength=1.0, alpha=0.4):
+    """大光比（白天室内、逆光）时提亮暗部，相当于 Lightroom 的“阴影”：越暗的区域按 (中灰/照明)^alpha
+    提亮，最多 1 + 1.5×strength 倍（默认 2.5），中灰（L 50）以上不动——窗户、天空不受影响。在保边的照明层上算，窗框不出光晕。
+    只在没有人脸、亮区（L>90）>= 5% 且暗区（L<25）>= 40% 时做：夜景亮区只有零星灯点（< 3.5%），
+    暗是氛围不该提亮；风景暗区不够多（< 30%）。返回 (倍数图, 说明)，不做时说明为空。"""
+    if an.subject is not None or strength <= 0:
+        return 1.0, ""
+    ys = base[::4, ::4]
+    bright = float((ys > L_to_lin(90)).mean())
+    dark = float((ys < L_to_lin(25)).mean())
+    if bright < 0.05 or dark < 0.40:
+        return 1.0, ""
+    mid = L_to_lin(50)
+    g = np.minimum((mid / np.maximum(base, 1e-4)) ** (alpha * strength), 1 + 1.5 * strength)
+    # 中灰附近平滑过渡到 1；极暗处（L<3，真正的黑）不提，避免抬灰
+    t = np.clip(np.log(mid / np.maximum(base, 1e-4)) / np.log(4), 0, 1)
+    g = 1 + (g - 1) * (t * t * (3 - 2 * t))
+    toe = np.clip((base - 0.002) / (0.006 - 0.002), 0, 1)
+    g = 1 + (g - 1) * toe
+    return g.astype(np.float32), f"大光比（亮区 {bright:.0%}、暗区 {dark:.0%}），阴影提亮最多 ×{float(g.max()):.1f}"
 
 
 def apply_gain(image, gain, knee=0.6):

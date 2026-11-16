@@ -1,4 +1,4 @@
-"""自动校正：建筑拉直 + 亮度 + 降噪 + 天空高光恢复（人像、夜景、风景通用，不做皮肤处理）。
+"""自动校正：建筑拉直 + 亮度 + 降噪 + 分层去雾 + 天空高光恢复（人像、夜景、风景通用，不做皮肤处理）。
 
 用法:
     python auto.py photo.jpg                 # 输出 output/photo_auto.jpg
@@ -8,7 +8,8 @@
     python auto.py photo.jpg --target 62 --denoise 0
     python auto.py photo.jpg --keystone 1    # 透视完全拉直（默认 0.8）；--straighten 0 关闭拉直
     python auto.py photo.jpg --sky 0         # 关闭天空高光恢复；--sky-darken 调天空减光档数（默认 0.6）
-顺序：先拉直（建筑照片才做），再按分析结果算增益图、降噪（强度取决于提亮后的噪声）、乘增益，最后恢复天空高光。
+    python auto.py photo.jpg --dehaze 0      # 关闭分层去雾（只在户外、有天空时做）
+顺序：先拉直（建筑照片才做），再按分析结果算增益图、降噪（强度取决于提亮后的噪声）、乘增益，再分层去雾（户外才做），最后恢复天空高光。
 """
 import argparse
 import os
@@ -19,6 +20,7 @@ import numpy as np
 
 from scripts import geometry
 from scripts.analyze import analyze, read_exif
+from scripts.dehaze import dehaze
 from scripts.denoise import denoise
 from scripts.exposure import apply_gain, gain_map
 from scripts.preprocess import preprocess_image
@@ -42,7 +44,7 @@ def process(image, path, opts):
     an = analyze(image, path, use_landmarks=not opts.no_landmarks)
     notes.insert(0, an.summary())
     if opts.exposure > 0:
-        gain, k, why = gain_map(image, an, opts.target, opts.exposure)
+        gain, k, why = gain_map(image, an, opts.target, opts.exposure, shadows=opts.shadows)
         notes.append(f"曝光 ×{k:.2f}（{why}），增益范围 {np.percentile(gain, 1):.2f}~{np.percentile(gain, 99):.2f}")
     else:
         gain = None
@@ -51,6 +53,13 @@ def process(image, path, opts):
     if gain is not None:
         result = apply_gain(result, gain)
     sky_w = None
+    sky = analyze_sky(result)
+    if opts.dehaze > 0:
+        if sky.found:
+            result, how = dehaze(result, opts.dehaze)
+            notes.append(f"去雾：{how}")
+        else:
+            notes.append("去雾：没有天空（室内或近景），跳过——白墙会被误当成雾")
     if opts.sky > 0:
         result, sky_w, how = recover_sky(result, analyze_sky(result), opts.sky, opts.sky_darken)
         notes.append(f"天空：{how}")
@@ -80,10 +89,12 @@ def main():
     ap.add_argument("input", help="图片文件或目录")
     ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
     ap.add_argument("--exposure", type=float, default=1.0, help="亮度校正强度 0~1，0 关闭（默认 1）")
+    ap.add_argument("--shadows", type=float, default=1.0, help="大光比（白天室内、逆光）时的阴影提亮强度，0 关闭（默认 1，约 1.5 明显更亮）")
     ap.add_argument("--target", type=float, default=58.0, help="人像脸部目标亮度 L*（默认 58）")
     ap.add_argument("--denoise", type=float, default=1.0, help="降噪强度 0~1，0 关闭（默认 1，噪声低时自动跳过）")
     ap.add_argument("--straighten", type=int, default=1, help="建筑拉直，0 关闭（默认 1，没有建筑时自动跳过）")
     ap.add_argument("--keystone", type=float, default=0.8, help="仰拍透视校正比例 0~1（默认 0.8，1 为完全拉直）")
+    ap.add_argument("--dehaze", type=float, default=1.0, help="分层去雾强度 0~1，0 关闭（默认 1，只在有天空时做，远景的雾保留）")
     ap.add_argument("--sky", type=float, default=1.0, help="天空高光恢复强度 0~1，0 关闭（默认 1，没有天空时跳过）")
     ap.add_argument("--sky-darken", type=float, default=0.6, help="天空顶部减光档数（默认 0.6，向下渐变到 0）")
     ap.add_argument("--no-landmarks", action="store_true", help="不用 mediapipe 关键点，只用 Haar 人脸框")

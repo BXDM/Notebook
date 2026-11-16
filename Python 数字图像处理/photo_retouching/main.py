@@ -18,6 +18,7 @@ import numpy as np
 from scripts.blemish import remove_blemishes
 from scripts.color_correction import color_correct
 from scripts.debug_report import write_debug
+from scripts.deveil import deveil
 from scripts.dodge_burn import dodge_burn
 from scripts.face import detect_faces
 from scripts.frequency_separation import frequency_separation
@@ -81,6 +82,8 @@ def process_image(image, opts, full_masks=False):
     faces = detect_faces(image, use_landmarks=not opts.no_landmarks)
     scale = feature_scale(image, faces)
     stages = {"original": image}
+    # 去眩光：脸旁强光源在镜头里散射叠的一层灰（只在脸周围有明显抬灰时做），后续蒙版都在去眩光后的图上算
+    image, veil_note = deveil(image, faces, opts.deveil)
     h, w = image.shape[:2]
     roi = person_roi(image.shape, faces) if faces else (0, 0, w, h)
     x0, y0, x1, y1 = roi
@@ -129,7 +132,7 @@ def process_image(image, opts, full_masks=False):
 
     if full_masks:
         masks = _embed_masks(masks, image.shape, roi)
-    info = {"faces": faces, "scale": scale,
+    info = {"faces": faces, "scale": scale, "veil": veil_note,
             "landmarks": any(f.points is not None for f in faces)}
     return image, masks, blemishes, stages, info
 
@@ -151,6 +154,7 @@ def main():
     ap = argparse.ArgumentParser(description="人像精修：祛痘、匀肤、磨皮、美白、瘦脸、调色、锐化")
     ap.add_argument("input", nargs="?", default="data/raw", help="图片文件或目录（默认 data/raw）")
     ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
+    ap.add_argument("--deveil", type=float, default=0.8, help="去眩光强度 0~1，0 关闭（默认 0.8，脸周没有抬灰时自动跳过）")
     ap.add_argument("--blemish", type=float, default=1.0, help="瑕疵检测灵敏度，0 关闭（默认 1.0）")
     ap.add_argument("--freckles", type=float, default=0.0, help="雀斑减淡强度 0~1（默认 0 保留）")
     ap.add_argument("--moles", action="store_true", help="去除痣（默认保留）")
@@ -200,7 +204,7 @@ def main():
             mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
         kinds = Counter(b.kind for b in blemishes if b.weight > 0)
         fixed = "、".join(f"{k} {v}" for k, v in kinds.items()) or "无"
-        print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），处理瑕疵 {fixed}，"
+        print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），{info['veil']}，处理瑕疵 {fixed}，"
               f"{time.time() - t0:.1f}s -> {dst}")
 
 
