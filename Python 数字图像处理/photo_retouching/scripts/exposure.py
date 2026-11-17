@@ -107,9 +107,12 @@ def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5, shadows=1.0):
 def shadow_lift(base, an, strength=1.0, alpha=0.4):
     """大光比（白天室内、逆光）时提亮暗部，相当于 Lightroom 的“阴影”：越暗的区域按 (中灰/照明)^alpha
     提亮，最多 1 + 1.5×strength 倍（默认 2.5），中灰（L 50）以上不动——窗户、天空不受影响。在保边的照明层上算，窗框不出光晕。
-    只在没有人脸、亮区（L>90）>= 5% 且暗区（L<25）>= 40% 时做：夜景亮区只有零星灯点（< 3.5%），
+    只在没有人脸、现场亮度 EV100 >= 6（有 EXIF 时）、亮区（L>90）>= 5% 且暗区（L<25）>= 40% 时做：夜景亮区只有零星灯点（< 3.5%），
     暗是氛围不该提亮；风景暗区不够多（< 30%）。返回 (倍数图, 说明)，不做时说明为空。"""
     if an.subject is not None or strength <= 0:
+        return 1.0, ""
+    # 有 EXIF 时按现场亮度判断：EV < 6 是夜景/黄昏，暗是氛围，不提（亮区比例分不开湖面灯光倒影和窗户）
+    if an.ev100 is not None and an.ev100 < 6:
         return 1.0, ""
     ys = base[::4, ::4]
     bright = float((ys > L_to_lin(90)).mean())

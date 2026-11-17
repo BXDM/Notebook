@@ -89,6 +89,7 @@ class Analysis:
     subject: float      # 主体线性亮度：有人脸取脸部皮肤中位数，否则 None
     subject_hi: float   # 脸部皮肤最亮通道的 97 分位（线性）：侧光时受光面，提亮不能把它推到顶
     scene: str          # "portrait" / "night" / "landscape"
+    ev100: float = None # 拍摄现场亮度（EXIF 光圈、快门、ISO 算出）：白天户外 12~15，白天室内 7~10，黄昏 6~8，夜景 < 4
     notes: list = field(default_factory=list)
 
     def summary(self):
@@ -96,12 +97,13 @@ class Analysis:
         shot = []
         if "iso" in e:
             shot.append(f"ISO {e['iso']:.0f}")
-        if "exposure" in e:
+        if e.get("exposure", 0) > 0:  # 有的手机把快门写成 0
             shot.append(f"1/{1 / e['exposure']:.0f}s" if e["exposure"] < 1 else f"{e['exposure']:.1f}s")
         if "fnumber" in e:
             shot.append(f"f/{e['fnumber']:.1f}")
         subj = f"，主体 L {lin_to_L(self.subject):.0f}" if self.subject is not None else ""
-        return (f"{self.scene}，{' '.join(shot) or '无 EXIF'}，人脸 {len(self.faces)}，"
+        ev = f"EV {self.ev100:.1f}，" if self.ev100 is not None else ""
+        return (f"{self.scene}，{' '.join(shot) or '无 EXIF'}，{ev}人脸 {len(self.faces)}，"
                 f"中位 L {lin_to_L(self.p50):.0f}{subj}，溢出 {self.clip * 100:.2f}%，"
                 f"噪声 亮度 {self.noise_luma:.1f} 色度 {self.noise_chroma:.1f}")
 
@@ -152,4 +154,12 @@ def analyze(image, path=None, faces=None, use_landmarks=True):
         scene = "night"
     else:
         scene = "landscape"
-    return Analysis(exif, faces, nl, nc, float(p50), float(p99), clip, subject, subject_hi, scene)
+    return Analysis(exif, faces, nl, nc, float(p50), float(p99), clip, subject, subject_hi, scene, ev100(exif))
+
+
+def ev100(exif):
+    """EV100 = log2(N²/t) − log2(ISO/100)；缺任一项返回 None。"""
+    n, t, iso = exif.get("fnumber"), exif.get("exposure"), exif.get("iso")
+    if not (n and t and iso) or n <= 0 or t <= 0 or iso <= 0:
+        return None
+    return float(np.log2(n * n / t) - np.log2(iso / 100.0))

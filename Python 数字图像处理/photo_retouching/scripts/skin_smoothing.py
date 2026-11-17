@@ -39,8 +39,8 @@ def skin_smoothing(image, masks, scale, strength=0.7, grain=0.6):
     b2 = masked_blur(b1, region, max(2.0, scale / 40))
     high, mid = img - b1, b1 - b2
 
-    # 分区权重：鼻子毛孔多、保留略多；脸以外的身体皮肤略弱
-    region_w = 1.0 - 0.2 * masks.nose - 0.2 * np.clip(masks.skin - masks.face, 0, 1)
+    # 分区权重：脸以外的身体皮肤略弱。鼻子不再减弱——鼻梁鼻翼的毛孔、油光颗粒正是最显眼的“坑洼”
+    region_w = 1.0 - 0.2 * np.clip(masks.skin - masks.face, 0, 1)
     mid_keep = 1.0 - strength * region_w * masks.skin
 
     # 高频：按相机噪声水平收缩
@@ -49,6 +49,8 @@ def skin_smoothing(image, masks, scale, strength=0.7, grain=0.6):
     g = lum ** 2 / (lum ** 2 + (2.0 * sigma_n) ** 2 + 1e-6)
     g = cv2.GaussianBlur(g, (0, 0), 1.0)
     high_keep = 1.0 - grain * masks.skin * (1.0 - g)
+    # 鼻子：毛孔在这里最密最深，高频在噪声收缩之外再削一半（仍保留一半质感）
+    high_keep *= 1.0 - 0.5 * masks.nose * masks.skin
 
     # 分区处理：开阔皮肤全额去中频（那里的大起伏就是痘印、斑驳，应该去掉）；
     # 只在皮肤与非皮肤（鼻孔、嘴、眼、发丝、脸部轮廓）的交界带里按幅度保留大起伏——那里的大起伏是
@@ -58,4 +60,17 @@ def skin_smoothing(image, masks, scale, strength=0.7, grain=0.6):
     small = np.exp(-(m / 25.0) ** 2)  # 起伏 10 灰度时磨皮效果保留 85%，25 时 37%，50 以上基本不动
     factor = (1 - zone) + zone * small
     out = img + mid * ((mid_keep - 1) * factor)[..., None] + high * (high_keep - 1)[..., None]
+    out = _soften_glints(out, masks, scale)
     return np.clip(out + 0.5, 0, 255).astype(np.uint8)
+
+
+def _soften_glints(img, masks, scale, keep=0.35):
+    """油光颗粒：比周围亮、只有几个像素大的高光点（鼻梁、额头最多）。用小尺度白顶帽找出，压到 keep；
+    大片的柔和高光（脸颊受光面）尺度大，不受影响。只在皮肤里做。"""
+    L = img.mean(axis=2)
+    k = max(3, int(scale / 60)) | 1
+    se = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    tophat = L - cv2.morphologyEx(L, cv2.MORPH_OPEN, se)
+    tophat = np.clip(tophat - 3.0, 0, None)            # 3 灰度以内是纹理和噪声，不算油光
+    w = masks.skin * (0.5 + 0.5 * masks.nose)           # 鼻子全额，其他皮肤减半
+    return img - (tophat * (1 - keep) * w)[..., None]

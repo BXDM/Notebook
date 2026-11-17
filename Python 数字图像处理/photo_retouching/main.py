@@ -15,10 +15,12 @@ from dataclasses import fields, replace
 import cv2
 import numpy as np
 
+from scripts.analyze import read_exif
 from scripts.blemish import remove_blemishes
 from scripts.color_correction import color_correct
 from scripts.debug_report import write_debug
 from scripts.deveil import deveil
+from scripts.learned_denoise import smart_denoise
 from scripts.dodge_burn import dodge_burn
 from scripts.face import detect_faces
 from scripts.frequency_separation import frequency_separation
@@ -73,7 +75,7 @@ def whiten_amount(crop, masks, strength):
     return strength * float(np.clip((70 - L) / 12, 0, 1))
 
 
-def process_image(image, opts, full_masks=False):
+def process_image(image, opts, full_masks=False, iso=None):
     """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。
 
     皮肤类步骤只在人物区域（裁剪）上做再贴回，调色、锐化作用于整图；24MP 原图上人物通常只占一小块。
@@ -121,9 +123,12 @@ def process_image(image, opts, full_masks=False):
     # 美白
     image = on_person(lambda c: whiten_skin(c, masks.tone, whiten_amount(c, masks, opts.whiten)))
     stages["whiten"] = image
-    # 锐化（只锐化非皮肤）
+    # 非皮肤区域降噪（夜景衣服、背景的斑驳噪点），放在锐化前
     skin_full = np.zeros((h, w), np.float32)
     skin_full[y0:y1, x0:x1] = masks.skin
+    image, noise_note = smart_denoise(image, skin_full, opts.gpu, iso) if opts.denoise > 0 else (image, "降噪关闭")
+    stages["denoise"] = image
+    # 锐化（只锐化非皮肤，按噪声取芯）
     image = sharpen_image(image, skin_full, scale, opts.sharpen)
     stages["sharpen"] = image
     # 瘦脸（最后做，前面各步用的蒙版都对应变形前的位置）
@@ -132,7 +137,7 @@ def process_image(image, opts, full_masks=False):
 
     if full_masks:
         masks = _embed_masks(masks, image.shape, roi)
-    info = {"faces": faces, "scale": scale, "veil": veil_note,
+    info = {"faces": faces, "scale": scale, "veil": veil_note, "noise": noise_note,
             "landmarks": any(f.points is not None for f in faces)}
     return image, masks, blemishes, stages, info
 
@@ -155,6 +160,9 @@ def main():
     ap.add_argument("input", nargs="?", default="data/raw", help="图片文件或目录（默认 data/raw）")
     ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
     ap.add_argument("--deveil", type=float, default=0.8, help="去眩光强度 0~1，0 关闭（默认 0.8，脸周没有抬灰时自动跳过）")
+    ap.add_argument("--denoise", type=float, default=1.0, help="非皮肤区域学习型降噪，0 关闭（默认开，噪声低时跳过）")
+    ap.add_argument("--gpu", choices=["auto", "never", "always"], default="auto",
+                    help="降噪用 GPU（Modal）：auto 只在预计 CPU 超过 5 分钟时上传（默认），never 全在本机")
     ap.add_argument("--blemish", type=float, default=1.0, help="瑕疵检测灵敏度，0 关闭（默认 1.0）")
     ap.add_argument("--freckles", type=float, default=0.0, help="雀斑减淡强度 0~1（默认 0 保留）")
     ap.add_argument("--moles", action="store_true", help="去除痣（默认保留）")
@@ -184,28 +192,40 @@ def main():
         return
 
     params = {k: v for k, v in vars(opts).items() if k not in ("input", "output")}
+    failed = []
     for src, dst in jobs:
-        t0 = time.time()
-        original = preprocess_image(src, opts.max_side)
-        result, masks, blemishes, stages, info = process_image(original.copy(), opts,
-                                                                  full_masks=bool(opts.debug or opts.save_mask))
-        save_image(result, dst)
-        stem = os.path.splitext(dst)[0]
-        if opts.compare:
-            save_image(np.hstack([original, result]), f"{stem}_compare.jpg")
-        if opts.save_mask:
-            save_image((masks.skin * 255).astype(np.uint8), f"{stem}_mask.png")
-        if opts.debug:
-            name = os.path.splitext(os.path.basename(src))[0]
-            write_debug(opts.debug, name, stages, masks, blemishes, info["faces"], info["scale"], params)
-        if not info["faces"]:
-            mode = "未检出，跳过皮肤处理"
-        else:
-            mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
-        kinds = Counter(b.kind for b in blemishes if b.weight > 0)
-        fixed = "、".join(f"{k} {v}" for k, v in kinds.items()) or "无"
-        print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），{info['veil']}，处理瑕疵 {fixed}，"
-              f"{time.time() - t0:.1f}s -> {dst}")
+        try:
+            run_one(src, dst, opts, params)
+        except Exception as e:  # 批处理里一张出错不能拖垮整批：记下来，继续下一张
+            failed.append(os.path.basename(src))
+            print(f"{os.path.basename(src)}: 失败，跳过（{type(e).__name__}: {e}）")
+    if failed:
+        print(f"共 {len(jobs)} 张，失败 {len(failed)} 张：{'、'.join(failed)}")
+
+
+def run_one(src, dst, opts, params):
+    t0 = time.time()
+    original = preprocess_image(src, opts.max_side)
+    result, masks, blemishes, stages, info = process_image(original.copy(), opts,
+                                                              full_masks=bool(opts.debug or opts.save_mask),
+                                                              iso=read_exif(src).get("iso"))
+    save_image(result, dst)
+    stem = os.path.splitext(dst)[0]
+    if opts.compare:
+        save_image(np.hstack([original, result]), f"{stem}_compare.jpg")
+    if opts.save_mask:
+        save_image((masks.skin * 255).astype(np.uint8), f"{stem}_mask.png")
+    if opts.debug:
+        name = os.path.splitext(os.path.basename(src))[0]
+        write_debug(opts.debug, name, stages, masks, blemishes, info["faces"], info["scale"], params)
+    if not info["faces"]:
+        mode = "未检出，跳过皮肤处理"
+    else:
+        mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
+    kinds = Counter(b.kind for b in blemishes if b.weight > 0)
+    fixed = "、".join(f"{k} {v}" for k, v in kinds.items()) or "无"
+    print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），{info['veil']}，{info['noise']}，处理瑕疵 {fixed}，"
+          f"{time.time() - t0:.1f}s -> {dst}")
 
 
 if __name__ == "__main__":

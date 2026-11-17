@@ -4,3 +4,5 @@ output/
 debug/
 models/*.tflite
 __pycache__/
+models/sapiens/
+models/scunet/
