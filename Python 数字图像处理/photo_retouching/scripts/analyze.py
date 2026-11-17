@@ -90,6 +90,7 @@ class Analysis:
     subject_hi: float   # 脸部皮肤最亮通道的 97 分位（线性）：侧光时受光面，提亮不能把它推到顶
     scene: str          # "portrait" / "night" / "landscape"
     ev100: float = None # 拍摄现场亮度（EXIF 光圈、快门、ISO 算出）：白天户外 12~15，白天室内 7~10，黄昏 6~8，夜景 < 4
+    subject_hi_y: float = None  # 脸部皮肤亮度 90 分位（线性）：受光面的大面积亮度，不受个别高光点影响
     notes: list = field(default_factory=list)
 
     def summary(self):
@@ -133,8 +134,8 @@ def face_skin_stats(lin, lin_y, faces):
             ms.append(lin_max[sl].ravel())
     ys = np.concatenate(ys) if ys else np.array([])
     if not ys.size:
-        return None, None
-    return float(np.median(ys)), float(np.percentile(np.concatenate(ms), 97))
+        return None, None, None
+    return float(np.median(ys)), float(np.percentile(np.concatenate(ms), 97)), float(np.percentile(ys, 90))
 
 
 def analyze(image, path=None, faces=None, use_landmarks=True):
@@ -147,14 +148,15 @@ def analyze(image, path=None, faces=None, use_landmarks=True):
     small = cv2.resize(y, None, fx=0.25, fy=0.25, interpolation=cv2.INTER_AREA)
     p50, p99 = np.percentile(small, [50, 99.9])
     clip = float((image.max(axis=2) >= 254).mean())
-    subject, subject_hi = face_skin_stats(lin, y, faces) if faces else (None, None)
+    subject, subject_hi, subject_hi_y = face_skin_stats(lin, y, faces) if faces else (None, None, None)
     if faces:
         scene = "portrait"
     elif lin_to_L(p50) < 25:
         scene = "night"
     else:
         scene = "landscape"
-    return Analysis(exif, faces, nl, nc, float(p50), float(p99), clip, subject, subject_hi, scene, ev100(exif))
+    return Analysis(exif, faces, nl, nc, float(p50), float(p99), clip, subject, subject_hi, scene, ev100(exif),
+                    subject_hi_y)
 
 
 def ev100(exif):

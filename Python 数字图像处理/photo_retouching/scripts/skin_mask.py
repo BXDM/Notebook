@@ -9,6 +9,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from scripts.filters import grow, shrink
+
 from scripts.face import nostril_parts_mask
 from scripts.face_parsing import parse_faces
 from scripts.person_seg import segment_person
@@ -69,8 +71,11 @@ def _color_model(image, faces, sample_mask=None):
 
 def _clean(hard, scale):
     k = max(3, int(scale / 40) | 1)
-    hard = cv2.morphologyEx(hard, cv2.MORPH_OPEN, _ellipse(k))
-    return cv2.morphologyEx(hard, cv2.MORPH_CLOSE, _ellipse(k), iterations=2)
+    if k <= 25:
+        hard = cv2.morphologyEx(hard, cv2.MORPH_OPEN, _ellipse(k))
+        return cv2.morphologyEx(hard, cv2.MORPH_CLOSE, _ellipse(k), iterations=2)
+    hard = grow(shrink(hard, k), k)                 # 开运算
+    return shrink(grow(hard, 2 * k), 2 * k)         # 闭运算两次 ≈ 两倍核的一次闭运算
 
 
 def _keep_connected(hard, seed, min_area):
@@ -109,7 +114,7 @@ def skin_mask(image, faces, use_parsing=True):
     allowed = None
     if person is not None:
         allowed = ((person["body"] + person["face"]) > 0.5).astype(np.uint8) * 255
-        allowed = cv2.dilate(allowed, _ellipse(scale / 20)) > 0
+        allowed = grow(allowed, scale / 20) > 0
         allowed &= (person["cloth"] < 0.5) & (person["hair"] < 0.5)
     if parsed is not None:
         method = "parsing"
@@ -121,7 +126,7 @@ def skin_mask(image, faces, use_parsing=True):
 
         # 身体皮肤（胸口、肩、手臂）：用脸部皮肤采样的肤色模型，排除分割认定的头发、衣物、饰品，
         # 且必须与脸/脖子相连（种子区放大一圈，跨过项链、颈带这类细的遮挡）
-        sample = cv2.erode((parsed["face"] > 0.8).astype(np.uint8) * 255, _ellipse(scale / 40))
+        sample = shrink((parsed["face"] > 0.8).astype(np.uint8) * 255, scale / 40)
         sample[protect > 0] = 0
         dist, lo = _color_model(image, faces, sample)
         not_skin = (parsed["hair"] > 0.5) | (parsed["features"] > 0.4) | (parsed["cloth"] > 0.5)
@@ -130,7 +135,7 @@ def skin_mask(image, faces, use_parsing=True):
             body &= allowed
         body = body.astype(np.uint8) * 255
         body = _clean(body, scale)
-        body = _keep_connected(body, cv2.dilate(head_skin, _ellipse(scale / 5)), (scale / 6) ** 2)
+        body = _keep_connected(body, grow(head_skin, scale / 5), (scale / 6) ** 2)
         skin_hard = head_skin | body
         nose = cv2.GaussianBlur(parsed["nose"], (0, 0), feather)
     else:

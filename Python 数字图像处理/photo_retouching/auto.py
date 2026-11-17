@@ -120,8 +120,8 @@ def main():
     ap.add_argument("--night", type=float, default=1.0, help="夜景光线调整强度，0 关闭（默认 1，只对夜景）")
     ap.add_argument("--glow", type=float, default=1.0, help="晚霞增强强度，0 关闭（默认 1，按识别出的晚霞强度作用）")
     ap.add_argument("--grade-strength", type=float, default=1.0, help="风格调色强度（默认 1）")
-    ap.add_argument("--gpu", choices=["auto", "never", "always"], default="auto",
-                    help="降噪用 GPU（Modal）：auto 只在预计 CPU 超过 5 分钟时上传（默认），never 全在本机")
+    ap.add_argument("--gpu", choices=["auto", "never", "always"], default="always",
+                    help="学习型降噪放哪：always 一律上 Modal GPU（开发阶段默认），auto 只在预计 CPU 超过 5 分钟时上传，never 全在本机")
     ap.add_argument("--no-landmarks", action="store_true", help="不用 mediapipe 关键点，只用 Haar 人脸框")
     ap.add_argument("--compare", action="store_true", help="额外保存左右对比图 *_compare.jpg")
     ap.add_argument("--debug", nargs="?", const="debug", metavar="DIR", help="保存增益图和分析报告到 DIR/<图名>/")

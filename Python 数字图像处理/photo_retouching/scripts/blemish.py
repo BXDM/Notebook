@@ -13,6 +13,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from scripts.filters import grow, shrink
+
 # 没有分割和关键点时，人脸框内不做祛痘的区域（相对坐标 x0, y0, x1, y1）：眉眼、鼻孔、嘴
 _FACE_EXCLUDE = [(0.0, 0.12, 1.0, 0.52), (0.30, 0.52, 0.70, 0.74), (0.22, 0.68, 0.78, 0.95)]
 _DIRS = [(np.cos(a), np.sin(a)) for a in np.linspace(0, 2 * np.pi, 12, endpoint=False)]
@@ -27,6 +29,18 @@ class Blemish:
     da: float
     ring_std: float  # 周围皮肤亮度起伏；褶皱、凹陷处很大
     weight: float  # 实际修复强度，0 表示保留
+
+
+def _hat(x, op, k, scale, face_px=700):
+    """顶帽/黑帽：脸宽超过 face_px 时缩小到约 face_px 再算、放大回来——只是找斑点的对比，
+    缩小后斑点仍有好几个像素；大核形态学在 4000 万像素原图上要几十秒。"""
+    f = scale / face_px
+    if f <= 1.5:
+        return cv2.morphologyEx(x, op, _ellipse(k))
+    h, w = x.shape
+    small = cv2.resize(x, (round(w / f), round(h / f)), interpolation=cv2.INTER_AREA)
+    r = cv2.morphologyEx(small, op, _ellipse(max(3, int(k / f) | 1)))
+    return cv2.resize(r, (w, h), interpolation=cv2.INTER_LINEAR)
 
 
 def _ellipse(k):
@@ -85,7 +99,7 @@ def _heal(img, high, region, blob, cand, d, weight):
     bx, by, bw, bh = cv2.boundingRect(blob)
     pad = int(d * 3) + 4
     Y0, Y1, X0, X1 = max(0, by - pad), min(h, by + bh + pad), max(0, bx - pad), min(w, bx + bw + pad)
-    roi_m = cv2.dilate(blob[Y0:Y1, X0:X1], _ellipse(max(3, d * 0.6)))
+    roi_m = grow(blob[Y0:Y1, X0:X1], max(3, d * 0.6))
     roi = img[Y0:Y1, X0:X1]
 
     base = cv2.inpaint(np.clip(roi, 0, 255).astype(np.uint8), roi_m, max(3, int(d)), cv2.INPAINT_TELEA)
@@ -94,7 +108,7 @@ def _heal(img, high, region, blob, cand, d, weight):
     # 找一个纹理供体：沿 12 个方向平移，要求整块落在干净皮肤内，取亮度最接近的
     my, mx = np.nonzero(roi_m)
     best, best_cost = None, None
-    ring_l = roi[cv2.dilate(roi_m, _ellipse(d)) > roi_m].mean()
+    ring_l = roi[grow(roi_m, d) > roi_m].mean()
     for dist in (1.6 * d + 3, 2.4 * d + 4):
         for cx, cy in _DIRS:
             oy, ox = int(round(cy * dist)), int(round(cx * dist))
@@ -146,20 +160,20 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
             glabella = cv2.convexHull(f.points[[55, 65, 285, 295, 168, 6]].astype(np.int32))
             g = np.zeros(region.shape, np.uint8)
             cv2.fillConvexPoly(g, glabella, 255)
-            region[cv2.dilate(g, _ellipse(f.box[2] * 0.05)) > 0] = 0
+            region[grow(g, f.box[2] * 0.05) > 0] = 0
             # 嘴角阴影
             region[f.part_mask(image.shape, ["lips"], grow=f.box[2] * 0.06) > 0] = 0
             # 鼻子侧面的轮廓阴影
             nose = f.part_mask(image.shape, ["nose"])
-            band = cv2.dilate(nose, _ellipse(f.box[2] * 0.06)) & ~cv2.erode(nose, _ellipse(f.box[2] * 0.06))
+            band = grow(nose, f.box[2] * 0.06) & ~shrink(nose, f.box[2] * 0.06)
             region[band > 0] = 0
     # 离五官、头发、轮廓边缘至少一个核的距离
-    inner = cv2.erode(region, _ellipse(k))
+    inner = shrink(region, k)
     if not np.any(inner):
         return image, []
 
-    dark = cv2.morphologyEx(L, cv2.MORPH_BLACKHAT, _ellipse(k))
-    red = cv2.morphologyEx(A, cv2.MORPH_TOPHAT, _ellipse(k))
+    dark = _hat(L, cv2.MORPH_BLACKHAT, k, scale)
+    red = _hat(A, cv2.MORPH_TOPHAT, k, scale)
     # 阈值 = 固定下限 与 皮肤内噪声水平 取大，再除以灵敏度
     t_dark = max(6.0, 4 * float(np.median(dark[inner > 0]))) / sensitivity
     t_red = max(3.5, 4 * float(np.median(red[inner > 0]))) / sensitivity
@@ -183,7 +197,7 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
         blob = np.zeros((y1 - y0, x1 - x0), np.uint8)
         blob[by - y0:by - y0 + bh, bx - x0:bx - x0 + bw] = mask
         # 周围环带：离开斑点自身的渐变边缘再取
-        ring = ((cv2.dilate(blob, _ellipse(d * 2.2 + 6)) > 0) & (cv2.dilate(blob, _ellipse(d * 0.9 + 5)) == 0)
+        ring = ((grow(blob, d * 2.2 + 6) > 0) & (grow(blob, d * 0.9 + 5) == 0)
                 & (region[y0:y1, x0:x1] > 0))
         if ring.sum() < 8:
             continue

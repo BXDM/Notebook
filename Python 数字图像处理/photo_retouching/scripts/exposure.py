@@ -57,7 +57,7 @@ def shoulder(x, knee, white):
     return np.where(x <= knee, x, knee + d / (1 + c * d))
 
 
-def exposure_factor(an, target_L=58.0, strength=1.0):
+def exposure_factor(an, target_L=58.0, strength=1.0, hi="max"):
     """返回曝光倍数 k 和说明。"""
     if an.subject is not None:
         # 偏暗才提亮；在目标到 72 之间不动；更亮（脸过曝）才往回压到 70
@@ -65,8 +65,12 @@ def exposure_factor(an, target_L=58.0, strength=1.0):
         goal = target_L if face_L < target_L else (70.0 if face_L > 72 else face_L)
         k = float(np.clip(L_to_lin(goal) / max(an.subject, 1e-4), 0.7, 4.0))
         why = f"脸部 L {face_L:.0f} 到 {goal:.0f}"
-        # 侧光时脸的受光面已经很亮：提亮后它的最亮通道不超过 0.8（sRGB 约 231）
-        if an.subject_hi and k > 1 and k * an.subject_hi > 0.8:
+        # 受光面保护。hi="luma"（人像配置）：按脸部亮度 90 分位，提亮后不超过 L 85——看大面积受光面，
+        # 不会被个别高光点、红润皮肤先到顶的红通道卡住；hi="max"（R10 配置，1.2 原样）：最亮通道 97 分位 ≤ 0.8
+        if hi == "luma" and an.subject_hi_y and k > 1 and k * an.subject_hi_y > L_to_lin(85):
+            k = max(1.0, L_to_lin(85) / an.subject_hi_y)
+            why += f"，受光面限制为 L {_L(k * an.subject):.0f}"
+        elif hi != "luma" and an.subject_hi and k > 1 and k * an.subject_hi > 0.8:
             k = max(1.0, 0.8 / an.subject_hi)
             why += f"，受光面限制为 L {_L(k * an.subject):.0f}"
     else:
@@ -84,12 +88,12 @@ def _L(y):
     return 116 * y ** (1 / 3) - 16 if y > 0.008856 else 903.3 * y
 
 
-def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5, shadows=1.0):
+def gain_map(image, an, target_L=58.0, strength=1.0, knee=0.5, shadows=1.0, hi="max"):
     """返回 (增益图 float32, 曝光倍数 k, 说明)。"""
     lin = to_linear(image)
     y = luminance(lin)
     base = illumination(y)
-    k, why = exposure_factor(an, target_L, strength)
+    k, why = exposure_factor(an, target_L, strength, hi)
     white = k * float(np.percentile(base[::4, ::4], 99.9))
     mapped = shoulder(k * base, knee, white)
     gain = mapped / np.maximum(base, 1e-4)
@@ -140,3 +144,28 @@ def apply_gain(image, gain, knee=0.6):
     m_new = np.maximum(np.minimum(m_new, m), np.minimum(m0, m))  # 不比原图更暗
     lin *= (np.minimum(m_new, 1.0) / np.maximum(m, 1e-6))[..., None]
     return to_srgb(lin)
+
+
+def face_fill(image, masks, roi, amount=0.5, min_spread=45.0):
+    """脸部补光（反光板）：强侧光时脸一半亮一半暗，整体提亮会把亮面冲白。只在脸部皮肤的大尺度照明层上，
+    把比脸部中位亮度暗的部分往中位拉 amount，亮面不动、纹理不变。脸部 L 10~90 分位差 < min_spread 时不做。
+    roi=(x0,y0,x1,y1) 为蒙版所在的人物区域。返回 (结果, 说明)。"""
+    from scripts.filters import masked_blur
+    x0, y0, x1, y1 = roi
+    crop = image[y0:y1, x0:x1]
+    lab = cv2.cvtColor(crop.astype(np.float32) / 255, cv2.COLOR_BGR2Lab)
+    L = lab[..., 0]
+    face = masks.face_hard > 0
+    if face.sum() < 100:
+        return image, ""
+    p10, p50, p90 = np.percentile(L[face], [10, 50, 90])
+    if p90 - p10 < min_spread:
+        return image, ""
+    w = float(np.sqrt(face.sum()))                       # 约等于脸宽
+    region = (masks.skin_hard > 0).astype(np.float32)
+    base = masked_blur(L, region, w / 12)                 # 照明层：只在皮肤里平均，五官、头发不混进来
+    lift = np.clip(p50 - base, 0, None) * amount * masks.tone
+    lab[..., 0] = L + lift
+    out = image.copy()
+    out[y0:y1, x0:x1] = np.clip(cv2.cvtColor(lab, cv2.COLOR_Lab2BGR) * 255 + 0.5, 0, 255).astype(np.uint8)
+    return out, f"，脸部补光（亮暗差 L {p90 - p10:.0f}，暗面最多 +{float(lift.max()):.0f}）"

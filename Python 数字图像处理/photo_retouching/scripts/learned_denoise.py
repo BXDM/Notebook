@@ -17,6 +17,11 @@ WEIGHTS = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 WEIGHTS_URL = "https://github.com/cszn/KAIR/releases/download/v1.0/scunet_color_real_psnr.pth"
 TILE, OVERLAP = 512, 32
 _model = None
+try:  # 有 CUDA（比如在云端 GPU 容器里跑整个流程）就直接用，本机没有则用 CPU
+    import torch as _torch
+    DEVICE = "cuda" if _torch.cuda.is_available() else "cpu"
+except ImportError:
+    DEVICE = "cpu"
 
 
 def _load():
@@ -33,7 +38,7 @@ def _load():
         torch.set_num_threads(os.cpu_count() or 4)
         m = SCUNet(in_nc=3, config=[4, 4, 4, 4, 4, 4, 4], dim=64)
         m.load_state_dict(torch.load(WEIGHTS, map_location="cpu"), strict=True)
-        _model = m.eval()
+        _model = m.eval().to(DEVICE)
     return _model
 
 
@@ -69,8 +74,8 @@ def denoise_tiles(image, todo, model=None):
             patch = rgb[y:y + TILE, x:x + TILE]
             ph, pw = patch.shape[:2]
             pad = np.pad(patch, ((0, TILE - ph), (0, TILE - pw), (0, 0)), mode="reflect")
-            t = torch.from_numpy(pad.transpose(2, 0, 1))[None]
-            o = model(t)[0].clamp(0, 1).numpy().transpose(1, 2, 0)[:ph, :pw]
+            t = torch.from_numpy(pad.transpose(2, 0, 1))[None].to(DEVICE)
+            o = model(t)[0].clamp(0, 1).cpu().numpy().transpose(1, 2, 0)[:ph, :pw]
             ww = win[:ph, :pw]
             acc[y:y + ph, x:x + pw] += o * ww[..., None]
             wsum[y:y + ph, x:x + pw] += ww
@@ -121,10 +126,10 @@ def smart_denoise(image, protect=None, gpu="auto", iso=None, min_noise=0.8, keep
     if not todo:
         return image, "无需处理的区域"
     est = CPU_SEC_PER_TILE * len(todo)
-    use_gpu = gpu == "always" or (gpu == "auto" and est > GPU_THRESHOLD_SEC)
+    use_gpu = DEVICE == "cpu" and (gpu == "always" or (gpu == "auto" and est > GPU_THRESHOLD_SEC))
     t0 = time.time()
     den = None
-    where = "CPU"
+    where = "本机 GPU" if DEVICE == "cuda" else "CPU"
     if use_gpu:
         try:
             from scripts import modal_denoise

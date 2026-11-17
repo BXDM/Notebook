@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import cv2
 import numpy as np
 
+from scripts.filters import grow as grow_mask
+
 
 
 @contextlib.contextmanager
@@ -47,8 +49,7 @@ class Face:
         for p in parts:
             cv2.fillConvexPoly(mask, self.hull(p), 255)
         if grow > 0:
-            k = int(grow) * 2 + 1
-            mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+            mask = grow_mask(mask, int(grow) * 2 + 1)
         return mask
 
     def under_eye_mask(self, shape):
@@ -188,6 +189,5 @@ def nostril_parts_mask(face, shape, grow=0, image=None):
         k = max(3, face.box[2] // 100) | 1
         mask = cv2.morphologyEx(dark, cv2.MORPH_OPEN, np.ones((k, k), np.uint8))
     if grow > 0:
-        k = int(grow) * 2 + 1
-        mask = cv2.dilate(mask, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k)))
+        mask = grow_mask(mask, int(grow) * 2 + 1)
     return mask

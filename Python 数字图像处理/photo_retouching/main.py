@@ -15,9 +15,10 @@ from dataclasses import fields, replace
 import cv2
 import numpy as np
 
-from scripts.analyze import read_exif
+from scripts.analyze import analyze, read_exif
+from scripts.exposure import apply_gain, face_fill, gain_map
 from scripts.blemish import remove_blemishes
-from scripts.color_correction import color_correct
+from scripts.color_correction import color_correct, skin_hue
 from scripts.debug_report import write_debug
 from scripts.deveil import deveil
 from scripts.learned_denoise import smart_denoise
@@ -75,7 +76,7 @@ def whiten_amount(crop, masks, strength):
     return strength * float(np.clip((70 - L) / 12, 0, 1))
 
 
-def process_image(image, opts, full_masks=False, iso=None):
+def process_image(image, opts, full_masks=False, iso=None, path=None, profile="portrait"):
     """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。
 
     皮肤类步骤只在人物区域（裁剪）上做再贴回，调色、锐化作用于整图；24MP 原图上人物通常只占一小块。
@@ -86,6 +87,17 @@ def process_image(image, opts, full_masks=False, iso=None):
     stages = {"original": image}
     # 去眩光：脸旁强光源在镜头里散射叠的一层灰（只在脸周围有明显抬灰时做），后续蒙版都在去眩光后的图上算
     image, veil_note = deveil(image, faces, opts.deveil)
+    # 曝光：以脸为基准（脸偏暗才提亮，受光面不冲白），在所有精修之前做，后面的蒙版、美白都按校正后的亮度
+    exp_note = "曝光不调"
+    if profile == "r10":
+        exp_note = "曝光不调（R10 配置，保持 1.2 设定）"
+    elif opts.exposure > 0 and faces:
+        an = analyze(image, path, faces=faces)
+        gain, k, why = gain_map(image, an, opts.target, opts.exposure, hi="luma")
+        if abs(k - 1) > 0.02:
+            image = apply_gain(image, gain)
+        exp_note = f"曝光 ×{k:.2f}（{why}）"
+    stages["exposure"] = image
     h, w = image.shape[:2]
     roi = person_roi(image.shape, faces) if faces else (0, 0, w, h)
     x0, y0, x1, y1 = roi
@@ -110,6 +122,12 @@ def process_image(image, opts, full_masks=False, iso=None):
     # 色彩校正（放在磨皮前，避免放大被磨掉的颗粒）
     face_px = image[y0:y1, x0:x1][masks.face_hard > 0] if faces else None
     image = color_correct(image, opts.color, face_px)
+    hue_note = ""
+    if profile != "r10" and faces and opts.skin_hue > 0:
+        image, hue_note = skin_hue(image, masks, (x0, y0, x1, y1), opts.skin_hue)
+    if profile != "r10" and faces and opts.fill > 0:
+        image, fill_note = face_fill(image, masks, (x0, y0, x1, y1), opts.fill)
+        hue_note += fill_note
     stages["color"] = image
     # 匀肤：色度低频均衡
     image = on_person(lambda c: frequency_separation(c, masks, scale, opts.even))
@@ -137,7 +155,7 @@ def process_image(image, opts, full_masks=False, iso=None):
 
     if full_masks:
         masks = _embed_masks(masks, image.shape, roi)
-    info = {"faces": faces, "scale": scale, "veil": veil_note, "noise": noise_note,
+    info = {"faces": faces, "scale": scale, "veil": veil_note, "noise": noise_note, "exposure": exp_note + hue_note,
             "landmarks": any(f.points is not None for f in faces)}
     return image, masks, blemishes, stages, info
 
@@ -159,10 +177,16 @@ def main():
     ap = argparse.ArgumentParser(description="人像精修：祛痘、匀肤、磨皮、美白、瘦脸、调色、锐化")
     ap.add_argument("input", nargs="?", default="data/raw", help="图片文件或目录（默认 data/raw）")
     ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
+    ap.add_argument("--profile", choices=["auto", "r10", "portrait"], default="auto",
+                    help="配置：auto 按相机型号选（Canon EOS R10 → r10，保持 1.2 设定；其他 → portrait，含人像曝光校正）")
+    ap.add_argument("--exposure", type=float, default=1.0, help="以脸为基准的曝光校正强度，0 关闭（默认 1）")
+    ap.add_argument("--target", type=float, default=58.0, help="脸部目标亮度 L*（默认 58）")
+    ap.add_argument("--fill", type=float, default=0.5, help="强侧光时脸部暗面补光强度 0~1（人像配置，默认 0.5）")
+    ap.add_argument("--skin-hue", type=float, default=0.6, help="肤色色相校正强度 0~1（人像配置，默认 0.6；R10 配置不做）")
     ap.add_argument("--deveil", type=float, default=0.8, help="去眩光强度 0~1，0 关闭（默认 0.8，脸周没有抬灰时自动跳过）")
     ap.add_argument("--denoise", type=float, default=1.0, help="非皮肤区域学习型降噪，0 关闭（默认开，噪声低时跳过）")
-    ap.add_argument("--gpu", choices=["auto", "never", "always"], default="auto",
-                    help="降噪用 GPU（Modal）：auto 只在预计 CPU 超过 5 分钟时上传（默认），never 全在本机")
+    ap.add_argument("--gpu", choices=["auto", "never", "always"], default="always",
+                    help="学习型降噪放哪：always 一律上 Modal GPU（开发阶段默认），auto 只在预计 CPU 超过 5 分钟时上传，never 全在本机")
     ap.add_argument("--blemish", type=float, default=1.0, help="瑕疵检测灵敏度，0 关闭（默认 1.0）")
     ap.add_argument("--freckles", type=float, default=0.0, help="雀斑减淡强度 0~1（默认 0 保留）")
     ap.add_argument("--moles", action="store_true", help="去除痣（默认保留）")
@@ -203,12 +227,21 @@ def main():
         print(f"共 {len(jobs)} 张，失败 {len(failed)} 张：{'、'.join(failed)}")
 
 
+def pick_profile(exif, choice):
+    """配置：R10 原片保持 1.2 的设定（不加人像曝光校正）；其他相机走正在研究的人像配置。"""
+    if choice != "auto":
+        return choice
+    return "r10" if "EOS R10" in str(exif.get("camera", "")) else "portrait"
+
+
 def run_one(src, dst, opts, params):
     t0 = time.time()
     original = preprocess_image(src, opts.max_side)
+    exif = read_exif(src)
+    profile = pick_profile(exif, opts.profile)
     result, masks, blemishes, stages, info = process_image(original.copy(), opts,
                                                               full_masks=bool(opts.debug or opts.save_mask),
-                                                              iso=read_exif(src).get("iso"))
+                                                              iso=exif.get("iso"), path=src, profile=profile)
     save_image(result, dst)
     stem = os.path.splitext(dst)[0]
     if opts.compare:
@@ -224,7 +257,7 @@ def run_one(src, dst, opts, params):
         mode = ("关键点" if info["landmarks"] else "Haar") + ("+分割" if masks.method == "parsing" else "")
     kinds = Counter(b.kind for b in blemishes if b.weight > 0)
     fixed = "、".join(f"{k} {v}" for k, v in kinds.items()) or "无"
-    print(f"{os.path.basename(src)}: 人脸 {len(info['faces'])}（{mode}），{info['veil']}，{info['noise']}，处理瑕疵 {fixed}，"
+    print(f"{os.path.basename(src)} [{profile}]: 人脸 {len(info['faces'])}（{mode}），{info['exposure']}，{info['veil']}，{info['noise']}，处理瑕疵 {fixed}，"
           f"{time.time() - t0:.1f}s -> {dst}")
 
 
