@@ -24,7 +24,7 @@ def one(f):
     if im is None:
         return []
     rows = []
-    for fc in detect_faces(im):
+    for fc in detect_faces(im, extras=True):
         s = face_shape_metrics(fc)
         if s is None:
             continue

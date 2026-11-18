@@ -108,9 +108,17 @@ def _load_options():
     }.items():
         _parts[name] = sorted({i for e in edges for i in (e.start, e.end)})
 
-    _options = vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=MODEL_PATH), num_faces=10,
-                                            output_face_blendshapes=True, output_facial_transformation_matrixes=True)
+    _options = vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=MODEL_PATH), num_faces=10)
     return _options
+
+
+def _options_with_extras():
+    """同一个模型，额外输出表情系数和人脸变换矩阵（选片、瘦脸用；人像修图流程不用，保持原样）。"""
+    base = _load_options()
+    if not base:
+        return base
+    from dataclasses import replace as dc_replace
+    return dc_replace(base, output_face_blendshapes=True, output_facial_transformation_matrixes=True)
 
 
 def _haar_faces(image):
@@ -149,9 +157,9 @@ def _iou(a, b):
     return inter / (a[2] * a[3] + b[2] * b[3] - inter + 1e-6)
 
 
-def detect_faces(image, use_landmarks=True):
+def detect_faces(image, use_landmarks=True, extras=False):
     """返回 [Face, ...]。大图分块检测再合并，块边缘被切到的脸丢弃（相邻块里有完整的）。"""
-    options = _load_options() if use_landmarks else False
+    options = (_options_with_extras() if extras else _load_options()) if use_landmarks else False
     if not options:
         return _haar_faces(image)
 

@@ -23,7 +23,7 @@ from scripts.slim import MIN_FACE_PX, _check, _face_like, is_child, need, warp_f
 
 def main_face(im):
     best = None
-    for f in detect_faces(im):
+    for f in detect_faces(im, extras=True):
         if f.points is None or f.depth is None:
             continue
         w = float(np.linalg.norm(f.points[454] - f.points[234]))

@@ -26,7 +26,7 @@ def main():
     os.makedirs(a.dst, exist_ok=True)
     for f in sorted(glob.glob(os.path.join(a.src, "*.[jJ][pP][gG]"))):
         im = cv2.imread(f)
-        faces = detect_faces(im)
+        faces = detect_faces(im, extras=True)
         out, notes = slim(im, faces, a.strength)
         n = os.path.basename(f)
         print(f"{n}: " + ("；".join(notes) or "没有人脸"), flush=True)

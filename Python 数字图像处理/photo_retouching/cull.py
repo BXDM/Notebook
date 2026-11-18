@@ -15,7 +15,8 @@ from multiprocessing import Pool
 import cv2
 import numpy as np
 
-from engine.batch.cull import analyze_one, decide, embed, group, verdict
+from engine.batch import aesthetic
+from engine.batch.cull import analyze_one, calibrate, decide, embed, group, verdict
 
 COLORS = {"保留": (60, 200, 60), "废片": (40, 40, 230), "重复": (150, 150, 150)}
 
@@ -33,7 +34,7 @@ def tile(s, size=220):
     t = cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=c)
     label = s.name[4:8] if s.name.upper().startswith(("DSCF", "IMG_")) else s.name[:8]
     cv2.putText(t, ("*" if s.best else "") + label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    tags = ",".join({"模糊": "blur", "闭眼": "eyes?", "眨眼": "blink", "垂眼": "down", "重复": "dup"}[x] for x in s.tags if x != "读不出")
+    tags = ",".join({"模糊": "blur", "闭眼": "eyes?", "眨眼": "blink", "垂眼": "down", "重复": "dup", "焦点在别处": "misfocus", "疑似拖影": "motion"}[x] for x in s.tags if x != "读不出")
     cv2.putText(t, tags, (8, size + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     return t
 
@@ -55,14 +56,23 @@ def main():
     with Pool(a.workers) as p:
         shots = p.map(analyze_one, files, chunksize=2)
     embed(shots)
-    decide(group(shots))
+    imgs = [s for s in shots if getattr(s, "aes_img", None) is not None]
+    scores = aesthetic.score([s.aes_img for s in imgs])
+    if scores is not None:
+        for s, v in zip(imgs, scores):
+            s.aes = v
+    th = calibrate(shots)
+    for _, note in th.values():
+        print("设备校正", note)
+    decide(group(shots), th)
     os.makedirs(os.path.join(a.output, "组"), exist_ok=True)
     with open(os.path.join(a.output, "选片.csv"), "w", newline="", encoding="utf-8-sig") as fh:
         w = csv.writer(fh)
-        w.writerow(["文件", "判定", "原因", "组", "组内最佳", "清晰度", "有人脸", "闭眼值", "下视值"])
+        w.writerow(["文件", "判定", "原因", "组", "组内最佳", "清晰度", "美学分", "方向比", "有人脸", "闭眼值", "下视值", "机型"])
         for s in shots:
             w.writerow([s.name, verdict(s), "、".join(s.tags), s.group, "是" if s.best else "", f"{s.sharp:.3f}" if s.sharp else "",
-                        "是" if s.has_face else "", f"{s.blink:.2f}", f"{s.look_down:.2f}"])
+                        f"{s.aes:.2f}" if s.aes is not None else "", f"{s.aniso:.2f}" if s.aniso is not None else "",
+                        "是" if s.has_face else "", f"{s.blink:.2f}", f"{s.look_down:.2f}", s.camera])
     cv2.imwrite(os.path.join(a.output, "总览.jpg"), sheet(shots, 12), [cv2.IMWRITE_JPEG_QUALITY, 85])
     groups = {}
     for s in shots:

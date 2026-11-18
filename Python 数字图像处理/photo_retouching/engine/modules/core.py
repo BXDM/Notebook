@@ -372,8 +372,11 @@ class Slim(Module):
         return Request(goal="slim", preserve=["face_structure", "background_lines"]), ""
 
     def run(self, ctx, req):
+        from scripts.face import detect_faces
         from scripts.slim import slim
-        image, notes = slim(ctx.image, ctx.faces, ctx.opts.slim)
+        # 瘦脸要姿态和表情系数：单独检测一次（extras），不改共享的 ctx.faces，人像流程保持原样
+        faces = detect_faces(ctx.image, extras=True)
+        image, notes = slim(ctx.image, faces, ctx.opts.slim)
         if image is ctx.image:
             return Report(self.name, ran=False, skipped="；".join(notes))
         ctx.update(image, "slim", invalidates="all")
