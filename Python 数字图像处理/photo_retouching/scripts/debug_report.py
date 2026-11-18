@@ -21,6 +21,9 @@ def mask_overlay(image, masks):
     ov[..., 0] += masks.face * 50
     p = masks.protect > 0
     ov[p] = ov[p] * 0.5 + np.array([0, 0, 255]) * 0.5
+    if masks.hand is not None:          # 手：品红
+        hm = masks.hand > 0.5
+        ov[hm] = ov[hm] * 0.5 + np.array([255, 0, 255]) * 0.5
     return np.clip(ov, 0, 255).astype(np.uint8)
 
 

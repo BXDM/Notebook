@@ -24,6 +24,7 @@ from scripts.deveil import deveil
 from scripts.learned_denoise import smart_denoise
 from scripts.dodge_burn import dodge_burn
 from scripts.face import detect_faces
+from scripts.hands import hand_mask
 from scripts.frequency_separation import frequency_separation
 from scripts.preprocess import preprocess_image
 from scripts.save_image import save_image
@@ -102,7 +103,10 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     roi = person_roi(image.shape, faces) if faces else (0, 0, w, h)
     x0, y0, x1, y1 = roi
     sub_faces = [_shift_face(f, x0, y0) for f in faces]
-    masks = skin_mask(image[y0:y1, x0:x1], sub_faces, use_parsing=not opts.no_parsing)
+    hands = None
+    if profile != "r10" and faces:
+        hands, _ = hand_mask(image[y0:y1, x0:x1])
+    masks = skin_mask(image[y0:y1, x0:x1], sub_faces, use_parsing=not opts.no_parsing, hand=hands)
 
     def on_person(step):
         out = image.copy()

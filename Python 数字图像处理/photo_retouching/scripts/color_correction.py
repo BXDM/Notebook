@@ -65,7 +65,15 @@ def skin_hue(image, masks, roi, amount=0.6, band=(45.0, 58.0)):
         return image, f"，肤色 {h0:.0f}° 正常"
     # 整片皮肤转同一个角度：按“与脸部主色的接近程度”加权会让腮红（偏红）转得少、皮肤转得多，
     # 两者的色差被压小，妆容变淡（消融实验：妆容色彩 -8~15%）。皮肤蒙版已排除嘴唇、眼睛、头发
-    r = np.radians(dh * masks.skin)
+    w = masks.skin if masks.hand is None else np.maximum(masks.skin, masks.hand)   # 手跟脸一起转，肤色一致
+    # 彩妆保护：腮红（脸上大尺度比脸部主色更红的连片区域，a* 高出 2→5 渐入）只跟着转 30%，保住腮红原本的颜色。
+    # 不保护时肤色校正会把腮红一起往黄转，偏红皮肤（572213 色相 27°）的腮红色偏 ΔE00 达 3.9
+    fw = float(np.sqrt(face.sum()))
+    a_low = cv2.GaussianBlur(a, (0, 0), max(2.0, fw / 30))
+    t = np.clip((a_low - np.median(a_low[face]) - 2.0) / 3.0, 0, 1)
+    blush = (t * t * (3 - 2 * t)) * masks.face
+    w = w * (1 - 0.7 * blush)
+    r = np.radians(dh * w)
     c, s = np.cos(r), np.sin(r)
     lab[..., 1], lab[..., 2] = a * c - b * s, a * s + b * c
     out = image.copy()

@@ -25,7 +25,8 @@ class Masks:
     protect: np.ndarray     # 0/255 uint8，五官、鼻孔、头发：任何修复都不碰
     nose: np.ndarray        # 0~1 float32，鼻子区域（毛孔明显，磨皮减弱）
     method: str             # "parsing" / "color"
-    tone: np.ndarray = None # 0~1 float32，皮肤 + 脸上的五官（嘴、眼、鼻孔），供美白这类整体调色
+    tone: np.ndarray = None # 0~1 float32，皮肤 + 脸上的五官（嘴、眼、鼻孔）+ 手，供美白这类整体调色
+    hand: np.ndarray = None # 0~1 float32，手（单独一区：不磨皮、不匀肤、不祛痘，只跟脸一起调肤色）
 
 
 def feature_scale(image, faces):
@@ -94,7 +95,8 @@ def _fixed_ycrcb(image):
     return (cr >= 133) & (cr <= 173) & (cb >= 77) & (cb <= 127) & (y > 40) & (y < 250)
 
 
-def skin_mask(image, faces, use_parsing=True):
+def skin_mask(image, faces, use_parsing=True, hand=None):
+    """hand：0/255 手部蒙版（人像配置传入），手从磨皮用的皮肤里拿掉、从保护区里拿掉，只进入整体调色。"""
     h, w = image.shape[:2]
     scale = feature_scale(image, faces)
     y_chan = cv2.cvtColor(image, cv2.COLOR_BGR2YCrCb)[..., 0]
@@ -174,6 +176,11 @@ def skin_mask(image, faces, use_parsing=True):
                 nose = np.maximum(nose, f.part_mask(image.shape, ["nose"]).astype(np.float32) / 255)
         nose = cv2.GaussianBlur(nose, (0, 0), feather)
 
+    if hand is not None:
+        hand = hand > 0
+        protect[hand] = 0          # 贴脸的手会被人脸分割当成头发/五官保护起来
+        skin_hard[hand] = 0        # 手通过脖子连进身体皮肤，会被当脸磨皮
+        face_hard[hand] = 0
     skin_hard[protect > 0] = 0
     face_hard[protect > 0] = 0
     skin = cv2.GaussianBlur(skin_hard.astype(np.float32) / 255.0, (0, 0), feather)
@@ -184,5 +191,9 @@ def skin_mask(image, faces, use_parsing=True):
     face[hard_protect] *= 0.0
     # 整体调色若避开五官，嘴唇、鼻孔周围会出现一圈没提亮的硬边，所以五官一起调；头发仍然不碰
     tone_hard = skin_hard | features
+    hand_soft = None
+    if hand is not None:
+        tone_hard = tone_hard | (hand.astype(np.uint8) * 255)
+        hand_soft = cv2.GaussianBlur(hand.astype(np.float32), (0, 0), feather)
     tone = cv2.GaussianBlur(tone_hard.astype(np.float32) / 255.0, (0, 0), feather)
-    return Masks(skin, skin_hard, face, face_hard, protect, nose, method, tone)
+    return Masks(skin, skin_hard, face, face_hard, protect, nose, method, tone, hand_soft)
