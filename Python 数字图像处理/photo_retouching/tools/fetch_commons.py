@@ -2,7 +2,7 @@
 
     python tools/fetch_commons.py 输出目录 --category "Portrait photographs of men" --search "portrait man" --max 200
 
-只取 jpg、宽高都 ≥ 1000 的照片，下载 1600 像素宽的缩略图；黑白照片（彩度很低）丢弃。
+只取 jpg、宽高都 ≥ 1000 的照片，下载 1280 像素宽的缩略图（Commons 只允许标准缩略图尺寸，非标准尺寸会被限流 429）；黑白照片（彩度很低）丢弃。
 出处清单写在 输出目录/manifest.tsv（文件名、页面、作者、授权）。已下载的跳过，可以反复运行补充。
 """
 import argparse
@@ -34,7 +34,7 @@ def get(url, tries=3):
 
 def query(params):
     base = {"action": "query", "format": "json", "prop": "imageinfo", "iiprop": "url|size|extmetadata|mime",
-            "iiurlwidth": "1600"}
+            "iiurlwidth": "1280"}
     cont = {}
     while True:
         p = {**base, **params, **cont}
@@ -98,7 +98,7 @@ def main():
             fh.flush()
             have.add(name)
             n += 1
-            time.sleep(0.5)
+            time.sleep(1.0)
         print(f"{kind} {q}: {n} 张", flush=True)
 
 
