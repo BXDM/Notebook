@@ -12,7 +12,7 @@ import cv2
 import numpy as np
 
 COL = {"保留": (60, 200, 60), "废片": (40, 40, 230), "重复": (150, 150, 150)}
-EN = {"模糊": "blur", "闭眼": "eyes?", "眨眼": "blink", "垂眼": "down", "重复": "dup", "焦点在别处": "misfocus", "疑似拖影": "motion"}
+EN = {"模糊": "blur", "闭眼": "eyes?", "眨眼": "blink", "垂眼": "down", "重复": "dup", "焦点在别处": "misfocus", "疑似拖影": "motion", "眼睛被遮挡": "hidden"}
 
 
 def thumb(path, size=200):

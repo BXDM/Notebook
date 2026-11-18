@@ -6,6 +6,9 @@
   X-H2 176 张实测（原图核对标注）：模糊 0.31~0.70，清晰 0.78~1.36；拉普拉斯能量、细/粗尺度比都分不开
   （噪点被当成边缘，缩图量又丢了细节）。拖影（沿一个方向仍有陡边）靠同组对比抓。
   没有人脸时取全图最清晰的一块，只做组内对比（背景虚化不算模糊）。
+  眼睛被挡住（墨镜、手、头发：眼部明显比脸颊暗且内部没层次）时改量鼻子到嘴一带（含镜框边缘），记“眼睛被遮挡”，
+  不参与设备校正统计——R10 实测墨镜脸量眼睛只有 0.7~0.85，全被误判成模糊。鼻嘴一带的边缘天生比睫毛柔和，
+  量级低：阈值取 HIDDEN_K × 正常阈值，组内也只和同样被遮挡的照片比（R10 核对：糊 0.28~0.38，软 0.39~0.49，清楚 ≥ 0.59）。
 - 闭眼：MediaPipe 表情系数 eyeBlink，取闭得更紧的那只眼（单眼闭也算）。闭眼本身不当废片：
   X-H2 被标闭眼/垂眼的 11 张核对下来都是主动的姿势（垂眼、低头看东西、仰头半闭眼），而且 eyeBlink 对垂眼也给 0.5~0.7。
   区分靠连拍上下文：同组里别的帧睁着眼、只有这张闭着 → “眨眼”（拍摄问题，组内选睁眼的那张）；
@@ -44,6 +47,7 @@ FOCUS_ELSEWHERE = 1.5
 FOCUS_SHARP = 2.0    # 别处那块本身也要真清楚：白底前的细叶对比强，糊了也有 1.7（0933），对焦到头饰上是 2.25（0776）
 CALIB_MIN = 20
 CALIB_K = 0.6
+HIDDEN_K = 0.6
 PICK_SHARP = 0.85
 
 
@@ -61,6 +65,7 @@ class Shot:
     face_tile: float = None
     best_tile: float = None
     aes: float = None
+    eyes_hidden: bool = False
     emb: np.ndarray = None
     tags: list = field(default_factory=list)
     group: int = -1
@@ -94,18 +99,35 @@ def _edge_steepness(gray, width=160):
     return float(np.percentile(mag, 99) / (np.percentile(g, 99) - np.percentile(g, 1) + 10))
 
 
+def _box(full, pts, fw, pad):
+    x0, y0 = pts.min(axis=0) - pad * fw
+    x1, y1 = pts.max(axis=0) + pad * fw
+    return full[max(int(y0), 0):int(y1), max(int(x0), 0):int(x1)]
+
+
 def _eye_sharpness(full, points, fw):
-    """原图上两只眼睛分开量，取清楚的那只（只取眼睛不含眉毛：眉毛常被刘海挡住）。"""
+    """原图上两只眼睛分开量，取清楚的那只（只取眼睛不含眉毛：眉毛常被刘海挡住）。
+    返回 (清晰度, 眼睛是否被挡住)。眼睛被挡住时改量鼻子到嘴一带（按同一比例缩放：眼宽约 0.25 脸宽 → 160 像素）。"""
     from scripts.face import _parts
-    vals = []
+    cheek = _box(full, points[[50, 280, 205, 425]], fw, 0.03)
+    cheek_l = float(cv2.cvtColor(cheek, cv2.COLOR_BGR2GRAY).mean()) if cheek.size else 128.0
+    vals, hidden = [], 0
     for part in ("left_eye", "right_eye"):
-        q = points[_parts[part]]
-        x0, y0 = q.min(axis=0) - 0.04 * fw
-        x1, y1 = q.max(axis=0) + 0.04 * fw
-        crop = full[max(int(y0), 0):int(y1), max(int(x0), 0):int(x1)]
-        if crop.size:
-            vals.append(_edge_steepness(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)))
-    return max(vals) if vals else None
+        crop = _box(full, points[_parts[part]], fw, 0.04)
+        if not crop.size:
+            continue
+        g = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY)
+        # 墨镜、手、头发挡住：眼部平均亮度不到脸颊的 55%，且内部亮度范围很小
+        if g.mean() < 0.55 * cheek_l and np.percentile(g, 95) - np.percentile(g, 5) < 0.45 * cheek_l:
+            hidden += 1
+            continue
+        vals.append(_edge_steepness(g))
+    if vals:
+        return max(vals), False
+    crop = _box(full, points[[1, 4, 98, 327, 61, 291, 0, 17, 168]], fw, 0.04)
+    if not crop.size:
+        return None, True
+    return _edge_steepness(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), width=max(40, int(crop.shape[1] * 640 / fw))), True
 
 
 def _best_tile(gray, n=8):
@@ -152,7 +174,7 @@ def analyze_one(path):
         f = max(faces, key=lambda q: float(np.linalg.norm(q.points[454] - q.points[234])))
         pts = f.points / k
         fw = float(np.linalg.norm(pts[454] - pts[234]))
-        s.sharp = _eye_sharpness(full, pts, fw)
+        s.sharp, s.eyes_hidden = _eye_sharpness(full, pts, fw)
         s.aniso = _anisotropy(full, pts, fw)
         s.has_face = True
         # 对焦失误：同一尺度下脸部那块与全图最清楚的一块比较（缩到 1/4 再分块）
@@ -220,7 +242,7 @@ def calibrate(shots):
     """按机型定模糊阈值。返回 {机型: (阈值, 说明)}。"""
     out = {}
     for cam in {s.camera for s in shots}:
-        v = np.array([s.sharp for s in shots if s.camera == cam and s.has_face and s.sharp is not None])
+        v = np.array([s.sharp for s in shots if s.camera == cam and s.has_face and s.sharp is not None and not s.eyes_hidden])
         if len(v) >= CALIB_MIN:
             upper = v[v >= np.median(v)]
             thr = float(np.clip(CALIB_K * np.median(upper), 0.45, 1.0))
@@ -236,22 +258,27 @@ def decide(shots, thresholds=None):
     for s in shots:
         by.setdefault(s.group, []).append(s)
     for members in by.values():
-        top = max((m.sharp or 0) for m in members) or 1e-6
+        tops = {h: max([(m.sharp or 0) for m in members if m.eyes_hidden == h] or [0]) or 1e-6 for h in (False, True)}
         for m in members:
             if m.sharp is None:
                 continue
-            thr = thresholds.get(m.camera, (BLUR_ABS, ""))[0]
-            if (m.has_face and m.sharp < thr) or (len(members) > 1 and m.sharp < BLUR_REL * top):
+            thr = thresholds.get(m.camera, (BLUR_ABS, ""))[0] * (HIDDEN_K if m.eyes_hidden else 1.0)
+            same = [o for o in members if o.eyes_hidden == m.eyes_hidden]
+            if m.eyes_hidden:
+                m.tags.append("眼睛被遮挡")
+            if (m.has_face and m.sharp < thr) or (len(same) > 1 and m.sharp < BLUR_REL * tops[m.eyes_hidden]):
                 m.tags.append("模糊")
                 if (m.face_tile and m.best_tile and m.best_tile > FOCUS_ELSEWHERE * m.face_tile
                         and m.best_tile >= FOCUS_SHARP):
                     m.tags.append("焦点在别处")
-            elif m.has_face and m.aniso is not None and m.aniso < MOTION_ANISO and m.sharp < 1.2 * thr:
+            elif (m.has_face and not m.eyes_hidden and m.aniso is not None and m.aniso < MOTION_ANISO
+                  and m.sharp < 1.2 * thr):      # 墨镜框的横线很强，方向比失真，被遮挡时不判拖影
                 m.tags.append("疑似拖影")
             if m.has_face and m.blink > BLINK:
                 opened = [o for o in members if o is not m and o.has_face and o.blink < 0.3]
                 m.tags.append("眨眼" if opened else ("垂眼" if m.look_down > LOOK_DOWN else "闭眼"))
-        cands = [m for m in members if (m.sharp or 0) >= PICK_SHARP * top and "眨眼" not in m.tags] or members
+        cands = [m for m in members if (m.sharp or 0) >= PICK_SHARP * tops[m.eyes_hidden] and "眨眼" not in m.tags
+                 and "模糊" not in m.tags] or members
         if all(m.aes is not None for m in cands):
             best = max(cands, key=lambda m: m.aes)
         else:
