@@ -6,8 +6,10 @@
   X-H2 176 张实测（原图核对标注）：模糊 0.31~0.70，清晰 0.78~1.36；拉普拉斯能量、细/粗尺度比都分不开
   （噪点被当成边缘，缩图量又丢了细节）。拖影（沿一个方向仍有陡边）靠同组对比抓。
   没有人脸时取全图最清晰的一块，只做组内对比（背景虚化不算模糊）。
-- 闭眼：MediaPipe 表情系数 eyeBlink，取闭得更紧的那只眼（单眼闭也算）；同时在往下看（eyeLookDown 高）记为“垂眼”，
-  多半是故意的，不算废片。
+- 闭眼：MediaPipe 表情系数 eyeBlink，取闭得更紧的那只眼（单眼闭也算）。闭眼本身不当废片：
+  X-H2 被标闭眼/垂眼的 11 张核对下来都是主动的姿势（垂眼、低头看东西、仰头半闭眼），而且 eyeBlink 对垂眼也给 0.5~0.7。
+  区分靠连拍上下文：同组里别的帧睁着眼、只有这张闭着 → “眨眼”（拍摄问题，组内选睁眼的那张）；
+  单张或整组都闭着 → “闭眼”提示，保留，留给人判断。
 - 画面特征：DINOv2-small 的 CLS 向量（Apache-2.0，Hugging Face facebook/dinov2-small），用于连拍分组。
   缩略图保持原比例（长边 224，边长取 14 的倍数）：压成正方形时换场景的两张也能有 0.88 的相似度，分不开。
 分组：按文件名（相机编号连续）排序，与上一张拍摄间隔 ≤ GAP_S 秒、与上一张相似度 ≥ SIM、
@@ -174,8 +176,9 @@ def decide(shots):
             if (m.has_face and m.sharp < BLUR_ABS) or (len(members) > 1 and m.sharp < BLUR_REL * top):
                 m.tags.append("模糊")
             if m.has_face and m.blink > BLINK:
-                m.tags.append("垂眼" if m.look_down > LOOK_DOWN else "闭眼")
-        score = lambda m: (m.sharp or 0) / top * (0.3 if "闭眼" in m.tags else 1.0) + 0.05 * m.smile
+                opened = [o for o in members if o is not m and o.has_face and o.blink < 0.3]
+                m.tags.append("眨眼" if opened else ("垂眼" if m.look_down > LOOK_DOWN else "闭眼"))
+        score = lambda m: (m.sharp or 0) / top * (0.3 if "眨眼" in m.tags else 1.0) + 0.05 * m.smile
         best = max(members, key=score)
         best.best = True
         if len(members) > 1:
@@ -186,6 +189,6 @@ def decide(shots):
 
 
 def verdict(s):
-    if "读不出" in s.tags or {"模糊", "闭眼"} & set(s.tags):
+    if "读不出" in s.tags or "模糊" in s.tags:
         return "废片"
     return "保留" if s.best else "重复"

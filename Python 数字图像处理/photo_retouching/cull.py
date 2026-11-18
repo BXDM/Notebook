@@ -33,7 +33,7 @@ def tile(s, size=220):
     t = cv2.copyMakeBorder(t, 6, 6, 6, 6, cv2.BORDER_CONSTANT, value=c)
     label = s.name[4:8] if s.name.upper().startswith(("DSCF", "IMG_")) else s.name[:8]
     cv2.putText(t, ("*" if s.best else "") + label, (8, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
-    tags = ",".join({"模糊": "blur", "闭眼": "eyes", "垂眼": "down", "重复": "dup"}[x] for x in s.tags if x != "读不出")
+    tags = ",".join({"模糊": "blur", "闭眼": "eyes?", "眨眼": "blink", "垂眼": "down", "重复": "dup"}[x] for x in s.tags if x != "读不出")
     cv2.putText(t, tags, (8, size + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2)
     return t
 
@@ -74,7 +74,8 @@ def main():
     v = [verdict(s) for s in shots]
     print(f"共 {len(shots)} 张，{len(groups)} 组（多张的 {sum(len(m) > 1 for m in groups.values())} 组）："
           f"保留 {sum(x.startswith('保留') for x in v)}、重复 {v.count('重复')}、废片 {v.count('废片')}；"
-          f"模糊 {sum('模糊' in s.tags for s in shots)}、闭眼 {sum('闭眼' in s.tags for s in shots)}、垂眼 {sum('垂眼' in s.tags for s in shots)}")
+          f"模糊 {sum('模糊' in s.tags for s in shots)}、眨眼 {sum('眨眼' in s.tags for s in shots)}、"
+          f"闭眼（可能是故意的，保留）{sum('闭眼' in s.tags for s in shots)}、垂眼 {sum('垂眼' in s.tags for s in shots)}")
 
 
 if __name__ == "__main__":
