@@ -102,10 +102,11 @@ def collect_jobs(inp, out):
     return [(inp, out)]
 
 
-def main():
-    ap = argparse.ArgumentParser(description="自动校正：亮度 + 降噪")
-    ap.add_argument("input", help="图片文件或目录")
-    ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
+def build_parser(io=True):
+    ap = argparse.ArgumentParser(description="自动校正：亮度 + 降噪", add_help=io)
+    if io:
+        ap.add_argument("input", help="图片文件或目录")
+        ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
     ap.add_argument("--exposure", type=float, default=1.0, help="亮度校正强度 0~1，0 关闭（默认 1）")
     ap.add_argument("--shadows", type=float, default=1.0, help="大光比（白天室内、逆光）时的阴影提亮强度，0 关闭（默认 1，约 1.5 明显更亮）")
     ap.add_argument("--target", type=float, default=58.0, help="人像脸部目标亮度 L*（默认 58）")
@@ -125,6 +126,11 @@ def main():
     ap.add_argument("--no-landmarks", action="store_true", help="不用 mediapipe 关键点，只用 Haar 人脸框")
     ap.add_argument("--compare", action="store_true", help="额外保存左右对比图 *_compare.jpg")
     ap.add_argument("--debug", nargs="?", const="debug", metavar="DIR", help="保存增益图和分析报告到 DIR/<图名>/")
+    return ap
+
+
+def main():
+    ap = build_parser()
     opts = ap.parse_args()
 
     if not os.path.exists(opts.input):

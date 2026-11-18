@@ -78,13 +78,14 @@ def whiten_amount(crop, masks, strength):
     return strength * float(np.clip((70 - L) / 12, 0, 1))
 
 
-def process_image(image, opts, full_masks=False, iso=None, path=None, profile="portrait"):
+def process_image(image, opts, full_masks=False, iso=None, path=None, profile="portrait", faces=None):
     """返回 (结果, 蒙版, 瑕疵列表, 各阶段图像, 附加信息)。
 
     皮肤类步骤只在人物区域（裁剪）上做再贴回，调色、锐化作用于整图；24MP 原图上人物通常只占一小块。
     没有人脸时跳过所有皮肤步骤。
     """
-    faces = detect_faces(image, use_landmarks=not opts.no_landmarks)
+    if faces is None:
+        faces = detect_faces(image, use_landmarks=not opts.no_landmarks)
     scale = feature_scale(image, faces)
     stages = {"original": image}
     # 去眩光：脸旁强光源在镜头里散射叠的一层灰（只在脸周围有明显抬灰时做），后续蒙版都在去眩光后的图上算
@@ -191,10 +192,11 @@ def collect_jobs(inp, out):
     return [(inp, out)]
 
 
-def main():
-    ap = argparse.ArgumentParser(description="人像精修：祛痘、匀肤、磨皮、美白、瘦脸、调色、锐化")
-    ap.add_argument("input", nargs="?", default="data/raw", help="图片文件或目录（默认 data/raw）")
-    ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
+def build_parser(io=True):
+    ap = argparse.ArgumentParser(description="人像精修：祛痘、匀肤、磨皮、美白、瘦脸、调色、锐化", add_help=io)
+    if io:
+        ap.add_argument("input", nargs="?", default="data/raw", help="图片文件或目录（默认 data/raw）")
+        ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
     ap.add_argument("--profile", choices=["auto", "r10", "portrait"], default="auto",
                     help="配置：auto 按相机型号选（Canon EOS R10 → r10，保持 1.2 设定；其他 → portrait，含人像曝光校正）")
     ap.add_argument("--exposure", type=float, default=1.0, help="以脸为基准的曝光校正强度，0 关闭（默认 1）")
@@ -226,8 +228,13 @@ def main():
     ap.add_argument("--save-mask", action="store_true", help="额外保存皮肤掩码 *_mask.png")
     ap.add_argument("--debug", nargs="?", const="debug", metavar="DIR",
                     help="保存各阶段输出、蒙版、瑕疵分类和 100%% 局部对比到 DIR/<图名>/（默认 debug/）")
-    opts = ap.parse_args()
     PARSER_DEFAULTS.update({k: ap.get_default(k) for k in PORTRAIT_DEFAULTS})
+    return ap
+
+
+def main():
+    ap = build_parser()
+    opts = ap.parse_args()
 
     if not os.path.exists(opts.input):
         ap.error(f"找不到输入: {opts.input}")
