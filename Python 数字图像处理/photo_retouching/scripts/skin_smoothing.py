@@ -74,3 +74,26 @@ def _soften_glints(img, masks, scale, keep=0.35):
     tophat = np.clip(tophat - 3.0, 0, None)            # 3 灰度以内是纹理和噪声，不算油光
     w = masks.skin * (0.5 + 0.5 * masks.nose)           # 鼻子全额，其他皮肤减半
     return img - (tophat * (1 - keep) * w)[..., None]
+
+
+def texture_balance(image, masks, scale, strength=0.5, ref_pct=40, lo=1.3, span=1.2):
+    """局部肤质平衡：同一张脸上，局部纹理（高频 + 中频，皮肤内）能量比全脸参考（第 ref_pct 百分位）
+    高出 lo 倍以上的地方，再按比例压细节，最多压 strength。低频（肤色、光影、腮红）不动。
+    针对“一侧脸（远离镜头、贴着散发的一侧）比另一侧粗 2~3 倍，统一的轻磨皮修完仍然糙”：
+    人像配置的磨皮故意很轻（保毛孔），这一步只在明显偏粗的地方补，平整的地方不再多磨。返回 (结果, 说明)。"""
+    face = masks.face_hard > 0
+    if strength <= 0 or face.sum() < 100:
+        return image, ""
+    img = image.astype(np.float32)
+    region = (masks.skin_hard > 0).astype(np.float32)
+    b1 = cv2.GaussianBlur(img, (0, 0), max(1.0, scale / 250))
+    b2 = masked_blur(b1, region, max(2.0, scale / 40))
+    detail = img - b2
+    d = detail.mean(axis=2)
+    energy = np.sqrt(masked_blur(d * d, region, max(2.0, scale / 25)))
+    ref = float(np.percentile(energy[face], ref_pct))
+    t = np.clip((energy / max(ref, 1e-3) - lo) / span, 0, 1)
+    k = strength * t * t * (3 - 2 * t) * masks.skin
+    out = img - detail * k[..., None]
+    share = float((k[face] > 0.1 * strength).mean())
+    return np.clip(out + 0.5, 0, 255).astype(np.uint8), f"，肤质平衡：{share:.0%} 的脸部皮肤偏粗（参考起伏 {ref:.1f}）"

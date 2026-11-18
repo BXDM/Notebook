@@ -31,7 +31,7 @@ from scripts.preprocess import preprocess_image
 from scripts.save_image import save_image
 from scripts.sharpening import sharpen_image
 from scripts.skin_mask import feature_scale, skin_mask
-from scripts.skin_smoothing import skin_smoothing
+from scripts.skin_smoothing import skin_smoothing, texture_balance
 from scripts.warping import slim_face
 from scripts.whitening import whiten_skin
 
@@ -143,6 +143,11 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     stages["dodge_burn"] = image
     # 多尺度磨皮
     image = on_person(lambda c: skin_smoothing(c, masks, scale, opts.smooth, opts.grain))
+    # 局部肤质平衡（人像配置）：一侧脸（远离镜头、贴着散发）比另一侧粗 2~3 倍时，只在偏粗处补压细节
+    if profile != "r10" and faces and opts.balance > 0:
+        notes = []
+        image = on_person(lambda c: (lambda r: notes.append(r[1]) or r[0])(texture_balance(c, masks, scale, opts.balance)))
+        hue_note += notes[0]
     stages["smooth"] = image
     # 美白
     image = on_person(lambda c: whiten_skin(c, masks.tone, whiten_amount(c, masks, opts.whiten)))
@@ -194,6 +199,7 @@ def main():
                     help="配置：auto 按相机型号选（Canon EOS R10 → r10，保持 1.2 设定；其他 → portrait，含人像曝光校正）")
     ap.add_argument("--exposure", type=float, default=1.0, help="以脸为基准的曝光校正强度，0 关闭（默认 1）")
     ap.add_argument("--target", type=float, default=58.0, help="脸部目标亮度 L*（默认 58）")
+    ap.add_argument("--balance", type=float, default=0.5, help="局部肤质平衡强度，0 关闭（人像配置）")
     ap.add_argument("--light", type=float, default=1.0, help="光影增强强度，0 关闭（人像配置，按条件自动触发）")
     ap.add_argument("--fill", type=float, default=0.5, help="强侧光时脸部暗面补光强度 0~1（人像配置，默认 0.5）")
     ap.add_argument("--skin-hue", type=float, default=0.6, help="肤色色相校正强度 0~1（人像配置，默认 0.6；R10 配置不做）")

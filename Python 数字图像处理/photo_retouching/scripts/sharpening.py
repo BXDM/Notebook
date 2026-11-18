@@ -25,6 +25,9 @@ def sharpen_image(image, soft_mask, scale, amount=0.5):
     mag = cv2.GaussianBlur(np.abs(dl), (0, 0), 1.0)
     t = (3.0 * sigma) ** 2
     core = mag ** 2 / (mag ** 2 + t)
-    weight = (amount * (1 - soft_mask) * core)[..., None]
+    # 皮肤蒙版是羽化过的，发丝旁、轮廓边只有 0.7~0.9：直接用 1 − 蒙版，锐化会漏进脸颊，把磨掉的颗粒加回 10~17%。
+    # 蒙版 ≥ 0.5 即视为皮肤、完全不锐化
+    skin = np.clip(soft_mask * 2.0, 0, 1)
+    weight = (amount * (1 - skin) * core)[..., None]
     result = img + d * weight
     return np.clip(result, 0, 255).astype(np.uint8)
