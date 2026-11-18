@@ -121,7 +121,8 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     stages["blemish"] = image
     # 色彩校正（放在磨皮前，避免放大被磨掉的颗粒）
     face_px = image[y0:y1, x0:x1][masks.face_hard > 0] if faces else None
-    image = color_correct(image, opts.color, face_px)
+    # 人像配置：肤色彩度至少保留 97%（R10 配置 85%）——放宽到 85% 会让整张脸连同腮红一起淡 7~14%
+    image = color_correct(image, opts.color, face_px, 0.85 if profile == "r10" else 0.97)
     hue_note = ""
     if profile != "r10" and faces and opts.skin_hue > 0:
         image, hue_note = skin_hue(image, masks, (x0, y0, x1, y1), opts.skin_hue)

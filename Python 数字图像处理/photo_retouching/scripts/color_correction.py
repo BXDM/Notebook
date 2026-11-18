@@ -9,7 +9,7 @@ def _skin_lab(pixels):
     return float(np.hypot(a, b)), float(np.degrees(np.arctan2(b, a)))
 
 
-def color_correct(image, strength=0.3, skin_pixels=None):
+def color_correct(image, strength=0.3, skin_pixels=None, min_chroma=0.85):
     """色彩校正：灰度世界白平衡 + 全局色阶拉伸，按 strength 与原图混合。
 
     用全局色阶而不是 CLAHE，避免局部对比度增强把皮肤颗粒放大。
@@ -31,7 +31,7 @@ def color_correct(image, strength=0.3, skin_pixels=None):
         for t in np.linspace(1.0, 0.0, 11):
             g = 1 + (gains - 1) * t * strength
             c, h = _skin_lab(px * g)
-            if c >= 0.85 * c0 and abs((h - h0 + 180) % 360 - 180) <= 10:
+            if c >= min_chroma * c0 and abs((h - h0 + 180) % 360 - 180) <= 10:
                 wb = t
                 break
         else:

@@ -42,6 +42,9 @@ def build_app(project):
         log = "\n".join(l for l in (p.stdout + p.stderr).splitlines()
                         if l.startswith(os.path.splitext(name)[0]) or "Error" in l or "失败" in l)
         outs = {os.path.basename(f): open(f, "rb").read() for f in glob.glob(f"{d}/out/*")}
+        # --debug 输出（蒙版等）也带回来，放在输出目录的 debug/<图名>/ 下
+        for f in glob.glob(f"/proj/debug/*/*"):
+            outs["debug/" + os.path.relpath(f, "/proj/debug")] = open(f, "rb").read()
         return name, outs, log or (p.stdout + p.stderr)[-2000:], time.time() - t
 
     return app, run_one
@@ -70,6 +73,7 @@ def main():
         jobs = [(tool, os.path.basename(f), open(f, "rb").read(), args) for f in files]
         for name, outs, log, dt in run_one.starmap(jobs, order_outputs=False):
             for fn, b in outs.items():
+                os.makedirs(os.path.dirname(os.path.join(out, fn)), exist_ok=True)
                 open(os.path.join(out, fn), "wb").write(b)
             print(f"[{dt:.0f}s] {log.strip()}", flush=True)
     print(f"共 {len(files)} 张，总耗时 {time.time() - t0:.0f}s（并行）")
