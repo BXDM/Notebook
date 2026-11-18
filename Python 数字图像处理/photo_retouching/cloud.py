@@ -3,9 +3,10 @@
     python cloud.py main  ~/PycharmProjects/sample/人像 -o out/          # 人像精修，每张一个容器并行
     python cloud.py auto  ~/PycharmProjects/sample/夜景 -o out/ --grade none
     python cloud.py main  照片目录 -o out/ --project <另一份代码目录>      # 用别的版本（比如 git archive 出的旧版）对比
+    python cloud.py photo 照片目录 -o out/                                  # 2.0 统一入口 photo.py
 
 容器里装与本机相同的依赖，带上 models/（不含 1.3 GB 的 sapiens），照片上传、结果回传，不在云端保存。
-除 -o、--project 外的参数原样传给 main.py / auto.py。
+除 -o、--project 外的参数原样传给 main.py / auto.py / photo.py。
 """
 import os
 import subprocess
@@ -51,7 +52,7 @@ def build_app(project):
 
 
 def main():
-    if len(sys.argv) < 3 or sys.argv[1] not in ("main", "auto"):
+    if len(sys.argv) < 3 or sys.argv[1] not in ("main", "auto", "photo"):
         sys.exit(__doc__)
     tool, src, rest = sys.argv[1], sys.argv[2], sys.argv[3:]
     out, project = "output", HERE

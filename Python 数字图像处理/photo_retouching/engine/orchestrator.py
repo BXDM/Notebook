@@ -18,8 +18,12 @@ class Orchestrator:
         return ctx.image
 
     @staticmethod
-    def summary(ctx):
+    def summary(ctx, skipped=False):
+        """执行了的模块及说明；skipped=True 时连同跳过的模块和原因（调试用）。"""
         parts = []
         for r in ctx.reports:
-            parts.append(f"[{r.module}] " + (r.notes if r.ran else f"跳过：{r.skipped}"))
-        return "；".join(parts)
+            if r.ran:
+                parts.append(f"[{r.module}] {r.notes}")
+            elif skipped:
+                parts.append(f"[{r.module}] 跳过：{r.skipped}")
+        return "；".join(parts) or "无需处理"

@@ -5,8 +5,10 @@
     python photo.py 照片目录 -o out/ --mode main   # 兼容模式：与 main.py 输出一致（回归用）
     python photo.py 照片目录 -o out/ --mode auto   # 兼容模式：与 auto.py 输出一致
 
-engine 模式（默认）目前的路由：有人脸 → 人像精修(1.x)，没有人脸 → 自动校正(1.x)。
-main.py / auto.py 的参数都可以直接传（如 --smooth、--grade none），各自取用。
+engine 模式（默认）：由 engine/modules/core.py 里拆出的模块组成，编排器按分析结果决定每个模块做不做。
+目前沿用 1.x 的分工：有人脸走人像链路，没有人脸走场景链路（拉直、降噪、曝光、去雾、天空、夜景、晚霞）。
+与 1.x 的区别：风格调色（橙青）默认不做（--grade auto 恢复 1.x 的夜景自动橙青）。
+main.py / auto.py 的参数都可以直接传（如 --smooth、--sky 0），各自取用。
 """
 import argparse
 import os
@@ -16,6 +18,7 @@ import time
 import auto as A
 import main as M
 from engine import Orchestrator, PhotoContext
+from engine.modules.core import default_modules
 from engine.modules.legacy import AutoPipeline, PortraitPipeline
 from scripts.preprocess import preprocess_image
 from scripts.save_image import save_image
@@ -35,6 +38,8 @@ def parse(argv):
     unknown = [x for x in p_rest if x in a_rest and x.startswith("-")]
     if unknown:
         ap.error(f"不认识的参数：{' '.join(unknown)}")
+    if opts.mode == "engine" and not any(x == "--grade" or x.startswith("--grade=") for x in rest):
+        a_opts.grade = "none"          # 2.0：不默认改氛围
     opts.portrait, opts.auto = p_opts, a_opts
     opts.max_side = p_opts.max_side
     opts.no_landmarks = p_opts.no_landmarks
@@ -46,7 +51,7 @@ def modules_for(mode):
         return [PortraitPipeline(always=True)]
     if mode == "auto":
         return [AutoPipeline(always=True)]
-    return [PortraitPipeline(), AutoPipeline()]
+    return default_modules()
 
 
 def collect_jobs(inp, out):
@@ -64,8 +69,17 @@ def run_one(src, dst, opts):
     t0 = time.time()
     image = preprocess_image(src, opts.max_side)
     ctx = PhotoContext(image, src, opts)
+    ctx.profile = M.pick_profile(ctx.exif, opts.portrait.profile)
+    ctx.popts = M.profile_opts(opts.portrait, ctx.profile, M.PARSER_DEFAULTS)
     result = Orchestrator(modules_for(opts.mode)).run(ctx)
     save_image(result, dst)
+    if opts.mode == "engine" and ctx.popts.debug and ctx.faces:
+        from scripts.debug_report import write_debug
+        p = ctx.person if "person" in ctx._cache else None
+        if p is not None:
+            masks = M._embed_masks(p.masks, result.shape, p.roi)
+            write_debug(ctx.popts.debug, os.path.splitext(os.path.basename(src))[0], ctx.stages, masks,
+                        ctx.get("blemishes", []), ctx.faces, p.scale, vars(ctx.popts))
     print(f"{os.path.basename(src)}: {Orchestrator.summary(ctx)}，{time.time() - t0:.1f}s -> {dst}", flush=True)
 
 

@@ -24,13 +24,11 @@ class PortraitPipeline(Module):
 
     def run(self, ctx, req):
         import main as M
-        o = ctx.opts.portrait
-        profile = M.pick_profile(ctx.exif, o.profile)
-        po = M.profile_opts(o, profile, M.PARSER_DEFAULTS)
+        po, profile = ctx.popts, ctx.profile
         result, masks, blemishes, stages, info = M.process_image(
             ctx.image.copy(), po, full_masks=bool(po.debug or po.save_mask), iso=ctx.iso, path=ctx.path,
             profile=profile, faces=ctx.faces)
-        ctx.update(result, "portrait")
+        ctx.update(result, "portrait", invalidates="all")
         ctx.stages.update(stages)
         ctx.put("masks", masks)
         ctx.put("blemishes", blemishes)
@@ -68,7 +66,7 @@ class AutoPipeline(Module):
         import auto as A
         o = ctx.opts.auto
         result, gain, an, notes, geo, sky_w = A.process(ctx.image, ctx.path, o)
-        ctx.update(result, "auto", geometry=bool(geo is not None and geo.ok))
+        ctx.update(result, "auto", invalidates="all")
         if o.debug and ctx.path:
             import numpy as np
             from scripts import geometry
