@@ -130,7 +130,7 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
         hue_note += fill_note
     stages["color"] = image
     # 匀肤：色度低频均衡
-    image = on_person(lambda c: frequency_separation(c, masks, scale, opts.even))
+    image = on_person(lambda c: frequency_separation(c, masks, scale, opts.even, 8.0 if profile == "r10" else 20.0))
     stages["even"] = image
     # Dodge & Burn：亮度局部均衡、黑眼圈
     image = on_person(lambda c: dodge_burn(c, masks, sub_faces, scale, opts.dodge_burn, opts.eye))
@@ -207,6 +207,7 @@ def main():
     ap.add_argument("--debug", nargs="?", const="debug", metavar="DIR",
                     help="保存各阶段输出、蒙版、瑕疵分类和 100%% 局部对比到 DIR/<图名>/（默认 debug/）")
     opts = ap.parse_args()
+    PARSER_DEFAULTS.update({k: ap.get_default(k) for k in PORTRAIT_DEFAULTS})
 
     if not os.path.exists(opts.input):
         ap.error(f"找不到输入: {opts.input}")
@@ -227,6 +228,22 @@ def main():
         print(f"共 {len(jobs)} 张，失败 {len(failed)} 张：{'、'.join(failed)}")
 
 
+# 人像配置的默认值（消融实验定的：磨皮 0.7 会削掉 20~30% 的中频明暗和毛孔，匀肤 0.5 冲淡腮红，
+# D&B 0.6 压平立体感 4~7%）。只替换用户没在命令行显式指定的参数；R10 配置保持 1.2 默认
+PARSER_DEFAULTS = {}
+PORTRAIT_DEFAULTS = {"smooth": 0.25, "grain": 0.2, "dodge_burn": 0.3, "eye": 0.3, "even": 0.35}
+
+
+def profile_opts(opts, profile, parser_defaults):
+    if profile == "r10":
+        return opts
+    o = argparse.Namespace(**vars(opts))
+    for k, v in PORTRAIT_DEFAULTS.items():
+        if getattr(o, k) == parser_defaults[k]:
+            setattr(o, k, v)
+    return o
+
+
 def pick_profile(exif, choice):
     """配置：R10 原片保持 1.2 的设定（不加人像曝光校正）；其他相机走正在研究的人像配置。"""
     if choice != "auto":
@@ -239,6 +256,7 @@ def run_one(src, dst, opts, params):
     original = preprocess_image(src, opts.max_side)
     exif = read_exif(src)
     profile = pick_profile(exif, opts.profile)
+    opts = profile_opts(opts, profile, PARSER_DEFAULTS)
     result, masks, blemishes, stages, info = process_image(original.copy(), opts,
                                                               full_masks=bool(opts.debug or opts.save_mask),
                                                               iso=exif.get("iso"), path=src, profile=profile)

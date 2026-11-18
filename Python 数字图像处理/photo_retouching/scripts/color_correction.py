@@ -49,8 +49,8 @@ def color_correct(image, strength=0.3, skin_pixels=None):
 
 def skin_hue(image, masks, roi, amount=0.6, band=(45.0, 58.0)):
     """肤色色相校正（类似 Lightroom HSL 里只动肤色的色相）：脸部皮肤色相中位数落在 band 外时，
-    把皮肤往 band 拉 amount 的差值，只作用于皮肤蒙版内、且色相在脸部色相 ±35° 内的像素——
-    天空、衣服、嘴唇不动。彩度、亮度不变。roi=(x0,y0,x1,y1) 为蒙版所在的人物区域。返回 (结果, 说明)。"""
+    把整片皮肤往 band 统一旋转 amount 的差值（只在皮肤蒙版内，天空、衣服、嘴唇不动），
+    皮肤内部的色差（腮红、修容）保持不变。彩度、亮度不变。roi=(x0,y0,x1,y1) 为蒙版所在的人物区域。返回 (结果, 说明)。"""
     x0, y0, x1, y1 = roi
     crop = image[y0:y1, x0:x1]
     lab = cv2.cvtColor(crop.astype(np.float32) / 255, cv2.COLOR_BGR2Lab)
@@ -63,10 +63,9 @@ def skin_hue(image, masks, roi, amount=0.6, band=(45.0, 58.0)):
     dh = (target - h0) * amount
     if abs(dh) < 0.5:
         return image, f"，肤色 {h0:.0f}° 正常"
-    h = np.degrees(np.arctan2(b, a))
-    near = np.clip(1 - np.abs(((h - h0 + 180) % 360) - 180) / 35.0, 0, 1)
-    w = masks.skin * near
-    r = np.radians(dh * w)
+    # 整片皮肤转同一个角度：按“与脸部主色的接近程度”加权会让腮红（偏红）转得少、皮肤转得多，
+    # 两者的色差被压小，妆容变淡（消融实验：妆容色彩 -8~15%）。皮肤蒙版已排除嘴唇、眼睛、头发
+    r = np.radians(dh * masks.skin)
     c, s = np.cos(r), np.sin(r)
     lab[..., 1], lab[..., 2] = a * c - b * s, a * s + b * c
     out = image.copy()
