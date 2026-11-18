@@ -12,7 +12,7 @@ def detail_noise(detail, luma, block=16):
     return float(np.percentile(sel if sel.size > 50 else st, 20))
 
 
-def sharpen_image(image, soft_mask, scale, amount=0.5):
+def sharpen_image(image, soft_mask, scale, amount=0.5, hard_skin=True):
     """USM 锐化，皮肤区域不锐化，主要锐化眼睛、眉毛、头发等细节。
     按噪声取芯（coring）：细节幅度接近噪声的地方不锐化，夜景高 ISO 的颗粒不会被放大。"""
     if amount <= 0:
@@ -26,8 +26,8 @@ def sharpen_image(image, soft_mask, scale, amount=0.5):
     t = (3.0 * sigma) ** 2
     core = mag ** 2 / (mag ** 2 + t)
     # 皮肤蒙版是羽化过的，发丝旁、轮廓边只有 0.7~0.9：直接用 1 − 蒙版，锐化会漏进脸颊，把磨掉的颗粒加回 10~17%。
-    # 蒙版 ≥ 0.5 即视为皮肤、完全不锐化
-    skin = np.clip(soft_mask * 2.0, 0, 1)
+    # 蒙版 ≥ 0.5 即视为皮肤、完全不锐化（hard_skin=False 为 1.2 行为，R10 配置用）
+    skin = np.clip(soft_mask * 2.0, 0, 1) if hard_skin else soft_mask
     weight = (amount * (1 - skin) * core)[..., None]
     result = img + d * weight
     return np.clip(result, 0, 255).astype(np.uint8)

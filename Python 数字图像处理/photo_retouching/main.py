@@ -165,7 +165,7 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     image, noise_note = smart_denoise(image, skin_full, opts.gpu, iso) if opts.denoise > 0 else (image, "降噪关闭")
     stages["denoise"] = image
     # 锐化（只锐化非皮肤，按噪声取芯）
-    image = sharpen_image(image, skin_full, scale, opts.sharpen)
+    image = sharpen_image(image, skin_full, scale, opts.sharpen, hard_skin=profile != "r10")
     stages["sharpen"] = image
     # 瘦脸（最后做，前面各步用的蒙版都对应变形前的位置）
     image = on_person(lambda c: slim_face(c, sub_faces, opts.slim))
