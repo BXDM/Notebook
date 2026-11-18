@@ -39,7 +39,9 @@ _LOWER_LIDS = [[33, 7, 163, 144, 145, 153, 154, 155, 133], [263, 249, 390, 373, 
 class Face:
     box: tuple                  # (x, y, w, h)，有关键点时按 Haar 框的比例换算，便于各步共用参数
     points: np.ndarray = None   # (478, 2) 像素坐标；Haar 模式下为 None
-    depth: np.ndarray = None    # (478,) 相对深度，与 x 同尺度（像素）；用于不受转头影响的脸型度量
+    depth: np.ndarray = None    # (478,) 相对深度，与 x 同尺度（像素）；模型推断的相对值，不是真实深度
+    pose: tuple = None          # 头部姿态 (偏航, 俯仰, 翻滚)，度；来自 MediaPipe 人脸变换矩阵
+    blend: dict = None          # 表情系数（MediaPipe blendshapes，0~1），如 cheekPuff、mouthPucker、eyeBlinkLeft
 
     def hull(self, part):
         return cv2.convexHull(self.points[_parts[part]].astype(np.int32))
@@ -106,7 +108,8 @@ def _load_options():
     }.items():
         _parts[name] = sorted({i for e in edges for i in (e.start, e.end)})
 
-    _options = vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=MODEL_PATH), num_faces=10)
+    _options = vision.FaceLandmarkerOptions(base_options=BaseOptions(model_asset_path=MODEL_PATH), num_faces=10,
+                                            output_face_blendshapes=True, output_facial_transformation_matrixes=True)
     return _options
 
 
@@ -128,6 +131,15 @@ def _tiles(h, w):
     xs = sorted({*range(0, w - t, step), w - t})
     ys = sorted({*range(0, h - t, step), h - t})
     return tiles + [(x, y, t, t) for y in ys for x in xs]
+
+
+def _euler(m):
+    """4x4 人脸变换矩阵 → (偏航, 俯仰, 翻滚) 度。偏航：转头（左右），俯仰：抬头低头，翻滚：歪头。"""
+    r = m[:3, :3] / np.linalg.norm(m[:3, 0])
+    yaw = np.degrees(np.arcsin(np.clip(-r[2, 0], -1, 1)))
+    pitch = np.degrees(np.arctan2(r[2, 1], r[2, 2]))
+    roll = np.degrees(np.arctan2(r[1, 0], r[0, 0]))
+    return float(yaw), float(pitch), float(roll)
 
 
 def _iou(a, b):
@@ -153,7 +165,7 @@ def detect_faces(image, use_landmarks=True):
         for tx, ty, tw, th in _tiles(h, w):
             tile = np.ascontiguousarray(rgb[ty:ty + th, tx:tx + tw])
             result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=tile))
-            for lms in result.face_landmarks:
+            for k, lms in enumerate(result.face_landmarks):
                 pts = np.array([(tx + p.x * tw, ty + p.y * th) for p in lms], np.float32)
                 depth = np.array([p.z * tw for p in lms], np.float32)
                 oval = pts[_parts["oval"]]
@@ -169,7 +181,12 @@ def detect_faces(image, use_landmarks=True):
                 by = y0 + (y1 - y0) * 0.08
                 box = (int(cx - bw / 2), int(by), int(bw), int(bw))
                 if all(_iou(box, f.box) < 0.3 for f in faces):
-                    faces.append(Face(box, pts, depth))
+                    pose = blend = None
+                    if result.facial_transformation_matrixes:
+                        pose = _euler(np.asarray(result.facial_transformation_matrixes[k]))
+                    if result.face_blendshapes:
+                        blend = {c.category_name: float(c.score) for c in result.face_blendshapes[k]}
+                    faces.append(Face(box, pts, depth, pose, blend))
     return faces
 
 

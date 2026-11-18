@@ -1,42 +1,53 @@
-"""自适应瘦脸：只瘦确实显大、瘦了能更好看的脸；本来就瘦、脸太小、侧得太厉害的不动（意义不大、风险高）。
+"""瘦脸（可选模块，默认关闭）：只给确实显宽、瘦了能更上镜的脸做轻度轮廓修饰，宁可不瘦也不瘦错。
 
-判断（用三维关键点，转头不影响）：
-- 丰满度 = 脸宽（两侧脸缘 234、454 的三维距离）/ 两眼外角距离。卡上 264 张可用人脸（2026-11-18 扫描）：
-  中位 1.56、90% 分位 1.66、97% 分位 1.72；从 1.66 开始瘦，1.76 满额，所以绝大多数脸不动。
-  （脸宽 / 脸高试过，排在最前的全是被误检成人脸的毛绒玩具，低头抬头也让它波动很大，不用。）
-- 跳过：没有关键点；脸宽 < MIN_FACE_PX（小脸瘦了看不出）；|偏航| > MAX_YAW（侧脸只看得到一侧轮廓，推错风险大）；
-  不像真脸（脸颊颜色不像皮肤、眼睛不比脸颊暗：玩具、花、手臂被误检成人脸）；表情夸张（嘟嘴、闭眼时眼角定位不准，嘴宽 / 眼距 > 0.8；
-  歪嘴笑，两嘴角高差 / 眼距 > 0.12）——这些情况比值偏大不是因为脸大。
-形变：沿下颌轮廓（颧骨下 → 下颌角 → 下巴两侧）向脸中线局部液化，位移上限 MAX_SHIFT × 脸宽。
-- 左右分开：转头时靠近镜头的一侧轮廓在画面里更宽，按两侧可见半宽分配位移。
-- 背景保护：形变区域里的长直线（门框、墙线、栏杆）附近位移衰减到 0，直线不会被推弯。
-- 只在脸周围的局部区域重映射。返回 (结果, 每张脸的说明)。
+一、判断（face_shape_metrics，只描述脸型比例，不是 BMI、不是脂肪厚度）
+- 宽度比 = 两侧脸缘（234、454）距离 / 两眼外角距离，用 MediaPipe 的相对三维坐标算（z 是模型推断的相对深度，
+  只用来抵消一点转头，不当作真实脸型）。卡上 264 张人脸：中位 1.56、90% 分位 1.66；1.66 附近胖瘦混杂
+  （单张测量误差约 ±0.04），1.73 以上基本是真正偏宽的脸：从 1.70 开始，1.80 满额。
+- 跳过：脸宽 < MIN_FACE_PX；头部姿态（人脸变换矩阵）偏航 > 25° 或俯仰 > 20°；不像真脸（肤色、眼睛比脸颊暗：
+  排除毛绒玩具、花、手臂误检）；表情系数（blendshapes）鼓腮、嘟嘴、张嘴、歪嘴笑（这时的脸型不作数）；
+  儿童（年龄模型 ≤ 12 岁）。笑的时候脸颊变宽，量减半。
+二、形变（MLS 移动最小二乘，相似变换）
+- 控制点：脸颊（93/132、323/361）每侧最多内收 CHEEK × 脸宽，下颌（58/172/136/150、288/397/365/379）最多 JAW × 脸宽，
+  方向指向脸部中线；眼、眉、鼻、嘴、下巴、太阳穴（耳朵高度 127/234、356/454）、额头和区域边框是固定锚点
+  ——五官、下巴长度、耳朵不动，形变只发生在脸颊和下颌附近。
+- 左右按可见半宽分配（转头时靠镜头一侧轮廓更宽）；区域内的长直线（门框、墙线）附近位移衰减到 0。
+- 收窄脸部轮廓时，轮廓外的背景被相应拉进来一点；位移只有脸宽的 1~1.5%，不会出现空洞。
+三、检查形变场：五官处位移超过 0.3% 脸宽、下颌没按预期移动、或位移越界时回退原图。
+返回 (结果, 每张脸的说明)。
 """
+import os
+
 import cv2
 import numpy as np
 
-MIN_FACE_PX = 250          # 脸宽（像素）小于这个不瘦：成片上看不出差别
-MAX_YAW = 25.0             # 偏航超过这个角度不瘦（30° 左右时三维测量已不稳，R10 的 5246 偏航 −31° 时被判成显大）
-MAX_SHIFT = 0.04           # 单侧最大位移 / 脸宽
-WE_RANGE = (1.66, 1.76)    # 丰满度（脸宽 / 两眼外角距离）：(起点, 满额)，起点以下一律不瘦
+MIN_FACE_PX = 250                    # 脸宽（像素）小于这个不瘦：成片上看不出差别
+MAX_YAW, MAX_PITCH = 25.0, 20.0      # 偏航 30° 左右时三维比例已不稳（R10 的 5246 偏航 −31° 时被判成显宽）
+WE_RANGE = (1.70, 1.80)              # 宽度比：(起点, 满额)，起点以下一律不瘦
+CHEEK, JAW = 0.010, 0.015            # 每侧最大内收 / 脸宽
 
-_JAW_L = [132, 58, 172, 136, 150]      # 画面左侧（人物的右脸）下颌轮廓，自上而下
-_JAW_R = [361, 288, 397, 365, 379]
+_CHEEK = [(93, 323), (132, 361)]
+_JAW = [(58, 288), (172, 397), (136, 365), (150, 379)]
+_JAW_TAPER = [1.0, 1.0, 0.8, 0.5]    # 越靠近下巴收得越少，下巴本身不动
+_ANCHORS = [127, 234, 356, 454,                      # 太阳穴 / 耳朵高度
+            33, 133, 263, 362, 159, 386, 70, 300,    # 眼、眉
+            1, 4, 98, 327, 168,                      # 鼻
+            61, 291, 0, 17,                          # 嘴
+            149, 176, 148, 152, 377, 400, 378, 10]   # 下巴、额头
+
+AGE_MODEL = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "models", "age_googlenet.onnx")
+_age_sess = None
 
 
-def shape_of(face):
-    """三维脸型度量；没有关键点或深度时返回 None。"""
+def face_shape_metrics(face):
+    """脸型比例与姿态；没有关键点时返回 None。"""
     if face.points is None or face.depth is None:
         return None
     p = np.c_[face.points, face.depth]
     d = lambda i, j: float(np.linalg.norm(p[i] - p[j]))
-    v = p[454] - p[234]
-    W = d(234, 454)
-    eye = d(33, 263)
-    return {"W": W, "W2d": float(np.linalg.norm(face.points[454] - face.points[234])),
-            "we": W / eye, "mouth": d(61, 291) / eye,
-            "tilt": abs(float(face.points[61][1] - face.points[291][1])) / eye,
-            "yaw": float(np.degrees(np.arctan2(v[2], v[0])))}
+    yaw, pitch, _ = face.pose if face.pose else (0.0, 0.0, 0.0)
+    return {"width_ratio": d(234, 454) / d(33, 263),
+            "W2d": float(np.linalg.norm(face.points[454] - face.points[234])), "yaw": yaw, "pitch": pitch}
 
 
 def _patch_lab(lab, pt, r):
@@ -47,8 +58,7 @@ def _patch_lab(lab, pt, r):
 
 
 def _face_like(image, face):
-    """排除误检（毛绒玩具、花、手臂手肘）：脸颊颜色像皮肤（Lab 色相 15~75°、彩度 ≥ 8），
-    且两眼虹膜中心（468、473）比脸颊暗 ≥ 10 L*。返回 (是否像真脸, 原因)。"""
+    """排除误检：脸颊颜色像皮肤（Lab 色相 15~75°、彩度 ≥ 8），且虹膜（468、473）比脸颊暗 ≥ 10 L*。返回 (是否, 原因)。"""
     x0, y0 = face.points.min(axis=0).astype(int)
     x1, y1 = face.points.max(axis=0).astype(int) + 1
     x0, y0 = max(x0, 0), max(y0, 0)
@@ -59,42 +69,87 @@ def _face_like(image, face):
     if not cheeks:
         return False, "看不到脸颊"
     L, a, b = np.median(cheeks, axis=0)
-    a, b = a - 128, b - 128
-    hue, chroma = np.degrees(np.arctan2(b, a)), np.hypot(a, b)
+    hue, chroma = np.degrees(np.arctan2(b - 128, a - 128)), np.hypot(a - 128, b - 128)
     if not (15 <= hue <= 75 and chroma >= 8):
         return False, "颜色不像人脸，可能是误检"
     eyes = [c for c in (_patch_lab(lab, pts[i], r) for i in (468, 473)) if c is not None] if len(pts) > 473 else []
     if not eyes or (L - np.median([e[0] for e in eyes])) / 2.55 < 10:
-        return False, "看不出眼睛（误检或闭眼），不瘦"
+        return False, "看不出眼睛（误检或闭眼）"
     return True, ""
+
+
+def is_child(image, face):
+    """年龄模型（ONNX 模型库 age_googlenet，Adience 8 个年龄段，Apache-2.0）判为 0~12 岁返回 True；模型缺失返回 None。
+    人脸网格会把孩子的脸往成人比例上拟合，几何特征分不出孩子（实测），所以用模型。"""
+    global _age_sess
+    if _age_sess is None:
+        if not os.path.exists(AGE_MODEL):
+            return None
+        import onnxruntime as ort
+        _age_sess = ort.InferenceSession(AGE_MODEL, providers=["CPUExecutionProvider"])
+    x0, y0 = face.points.min(axis=0)
+    x1, y1 = face.points.max(axis=0)
+    w, h = x1 - x0, y1 - y0
+    crop = image[max(int(y0 - 0.25 * h), 0):int(y1 + 0.125 * h), max(int(x0 - 0.25 * w), 0):int(x1 + 0.25 * w)]
+    if crop.size == 0:
+        return None
+    blob = (cv2.resize(crop, (224, 224)).astype(np.float32) - np.float32([104, 117, 123])).transpose(2, 0, 1)[None]
+    prob = _age_sess.run(None, {_age_sess.get_inputs()[0].name: blob})[0][0]
+    return int(np.argmax(prob)) <= 2
 
 
 def need(face, image=None, strength=1.0):
     """返回 (瘦脸量 0~1, 说明)。"""
-    s = shape_of(face)
+    s = face_shape_metrics(face)
     if s is None:
         return 0.0, "没有三维关键点"
     if s["W2d"] < MIN_FACE_PX:
         return 0.0, f"脸宽 {s['W2d']:.0f}px，太小"
-    if abs(s["yaw"]) > MAX_YAW:
-        return 0.0, f"侧脸 {s['yaw']:+.0f}°"
-    tag = f"丰满度 {s['we']:.2f}"
-    if s["we"] < WE_RANGE[0]:
-        return 0.0, f"不显大（{tag}）"
+    if abs(s["yaw"]) > MAX_YAW or abs(s["pitch"]) > MAX_PITCH:
+        return 0.0, f"姿态（偏航 {s['yaw']:+.0f}°、俯仰 {s['pitch']:+.0f}°）不瘦"
+    tag = f"宽度比 {s['width_ratio']:.2f}"
+    if s["width_ratio"] < WE_RANGE[0]:
+        return 0.0, f"不显宽（{tag}）"
     if image is not None:
         ok, why = _face_like(image, face)
         if not ok:
             return 0.0, why
-    if s["mouth"] > 0.8 or s["tilt"] > 0.12:
-        return 0.0, f"表情夸张（{tag} 不可信）"
-    amt = float(np.clip((s["we"] - WE_RANGE[0]) / (WE_RANGE[1] - WE_RANGE[0]), 0, 1)) * strength
+    b = face.blend or {}
+    roll = np.radians(face.pose[2]) if face.pose else 0.0
+    v = face.points[291] - face.points[61]
+    tilt = abs(float(-np.sin(roll) * v[0] + np.cos(roll) * v[1])) / float(np.linalg.norm(face.points[263] - face.points[33]))
+    if tilt > 0.12 or (b.get("cheekPuff", 0) > 0.3 or b.get("mouthPucker", 0) > 0.6 or b.get("jawOpen", 0) > 0.4
+            or abs(b.get("mouthSmileLeft", 0) - b.get("mouthSmileRight", 0)) > 0.3):
+        return 0.0, f"鼓腮/嘟嘴/张嘴/歪嘴笑（{tag} 不作数）"
+    if image is not None and is_child(image, face):
+        return 0.0, "儿童，不瘦"
+    amt = float(np.clip((s["width_ratio"] - WE_RANGE[0]) / (WE_RANGE[1] - WE_RANGE[0]), 0, 1)) * strength
+    smile = (b.get("mouthSmileLeft", 0) + b.get("mouthSmileRight", 0)) / 2
+    if smile > 0.5:
+        amt *= 0.5
+        tag += "，在笑减半"
     return amt, f"瘦 {amt:.0%}（{tag}，偏航 {s['yaw']:+.0f}°）"
+
+
+def _mls_similarity(grid, src, dst):
+    """MLS 相似变换（Schaefer 2006）：grid (N,2) 上每点在控制点 src→dst 下的映射。"""
+    d2 = ((grid[:, None, :] - src[None]) ** 2).sum(-1)
+    w = 1.0 / np.maximum(d2, 1e-6)
+    ws = w.sum(1, keepdims=True)
+    ps = (w @ src) / ws
+    qs = (w @ dst) / ws
+    ph = src[None] - ps[:, None]
+    qh = dst[None] - qs[:, None]
+    mu = (w * (ph ** 2).sum(-1)).sum(1)
+    a = (w * (ph * qh).sum(-1)).sum(1) / mu
+    b = (w * (ph[..., 0] * qh[..., 1] - ph[..., 1] * qh[..., 0])).sum(1) / mu
+    v = grid - ps
+    return np.stack([a * v[:, 0] - b * v[:, 1], b * v[:, 0] + a * v[:, 1]], 1) + qs
 
 
 def _line_guard(gray, radius):
     """长直线附近为 0、远处为 1 的权重（形变不推弯门框墙线）。"""
-    lsd = cv2.createLineSegmentDetector()
-    lines = lsd.detect(gray)[0]
+    lines = cv2.createLineSegmentDetector().detect(gray)[0]
     guard = np.ones(gray.shape, np.float32)
     if lines is None:
         return guard
@@ -103,54 +158,100 @@ def _line_guard(gray, radius):
         if np.hypot(x1 - x0, y1 - y0) >= radius:
             cv2.line(mask, (int(x0), int(y0)), (int(x1), int(y1)), 255, 3)
     if mask.any():
-        dist = cv2.distanceTransform(255 - mask, cv2.DIST_L2, 3)
-        t = np.clip(dist / (radius * 0.5), 0, 1)
+        t = np.clip(cv2.distanceTransform(255 - mask, cv2.DIST_L2, 3) / (radius * 0.5), 0, 1)
         guard = (t * t * (3 - 2 * t)).astype(np.float32)
     return guard
 
 
-def slim(image, faces, strength=1.0):
-    out = image
-    notes = []
+def warp_face(image, face, amt):
+    """对一张脸做 MLS 瘦脸，返回 (结果, 期望的单侧下颌位移像素)。只改脸周围的局部区域。"""
+    pts = face.points
+    fw = float(np.linalg.norm(pts[454] - pts[234]))
     H, W = image.shape[:2]
+    x0, y0 = (pts.min(axis=0) - fw * 0.35).astype(int)
+    x1, y1 = (pts.max(axis=0) + fw * 0.35).astype(int)
+    x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, W), min(y1, H)
+    top, bot = pts[168], pts[152]                    # 脸部中线：鼻根 → 下巴
+    axis = (bot - top) / (np.linalg.norm(bot - top) + 1e-6)
+
+    def inward(p):
+        foot = top + axis * np.dot(p - top, axis)
+        v = foot - p
+        return v / (np.linalg.norm(v) + 1e-6)
+
+    half_l = float(np.linalg.norm(pts[234] - pts[4]))
+    half_r = float(np.linalg.norm(pts[454] - pts[4]))
+    side_w = [2 * half_l / (half_l + half_r), 2 * half_r / (half_l + half_r)]
+    src, dst = [], []
+    for pairs, frac, tapers in ((_CHEEK, CHEEK, [1.0, 1.0]), (_JAW, JAW, _JAW_TAPER)):
+        for (i, j), t in zip(pairs, tapers):
+            for k, idx in enumerate((i, j)):
+                p = pts[idx]
+                src.append(p)
+                dst.append(p + inward(p) * fw * frac * amt * t * min(side_w[k], 1.3))
+    for idx in _ANCHORS:
+        src.append(pts[idx])
+        dst.append(pts[idx])
+    for t in np.linspace(0, 1, 8):                   # 区域边框固定
+        for q in ((x0 + t * (x1 - x0), y0), (x0 + t * (x1 - x0), y1 - 1),
+                  (x0, y0 + t * (y1 - y0)), (x1 - 1, y0 + t * (y1 - y0))):
+            src.append(np.float32(q))
+            dst.append(np.float32(q))
+    src, dst = np.float32(src), np.float32(dst)
+    # 逆映射（输出像素从哪里取样）= 控制点 dst→src 的 MLS；在 8 像素网格上算再插值
+    step = 8
+    gx, gy = np.meshgrid(np.arange(x0, x1, step, dtype=np.float32), np.arange(y0, y1, step, dtype=np.float32))
+    m = _mls_similarity(np.c_[gx.ravel(), gy.ravel()], dst, src).reshape(gx.shape + (2,))
+    dx = cv2.resize(m[..., 0] - gx, (x1 - x0, y1 - y0), interpolation=cv2.INTER_CUBIC)
+    dy = cv2.resize(m[..., 1] - gy, (x1 - x0, y1 - y0), interpolation=cv2.INTER_CUBIC)
+    gray = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    guard = _line_guard(gray, fw * 0.2)
+    inside = np.zeros(gray.shape, np.uint8)
+    cv2.fillConvexPoly(inside, cv2.convexHull((pts - [x0, y0]).astype(np.int32)), 1)
+    guard = np.maximum(guard, cv2.GaussianBlur(inside.astype(np.float32), (0, 0), fw * 0.04))
+    xs, ys = np.meshgrid(np.arange(x0, x1, dtype=np.float32), np.arange(y0, y1, dtype=np.float32))
+    dx, dy = dx * guard, dy * guard
+    patch = cv2.remap(image, xs + dx, ys + dy, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
+    out = image.copy()
+    out[y0:y1, x0:x1] = patch
+    mag = np.hypot(dx, dy)
+
+    def at(idx):
+        q = np.clip((pts[idx] - [x0, y0]).astype(int), 0, [x1 - x0 - 1, y1 - y0 - 1])
+        return mag[q[:, 1], q[:, 0]]
+    stats = {"expect": fw * JAW * amt, "feat": float(at([33, 263, 1, 61, 291, 152, 159, 386]).max()),
+             "jaw": float(np.median(at([58, 172, 288, 397]))), "max": float(mag.max()), "fw": fw}
+    return out, stats
+
+
+def _check(stats):
+    """形变场检查（不用重新检测关键点：MediaPipe 的轮廓点按人脸先验拟合，跟不上几个像素的形变，
+    轮廓一变还会带着五官点一起微调，实测会把正常形变误判成“下颌没收”“五官移动 0.5~1.5%”）：
+    五官处位移 ≤ 0.3% 脸宽；下颌处实际位移 ≥ 期望的一半（没被直线保护抵消）；最大位移 ≤ 期望的 2 倍。"""
+    fw, e = stats["fw"], stats["expect"]
+    if stats["feat"] > 0.003 * fw:
+        return False, f"五官处位移 {stats['feat'] / fw:.2%} 脸宽"
+    if stats["jaw"] < 0.5 * e:
+        return False, f"下颌只移动 {stats['jaw']:.1f}px（期望约 {e:.1f}px，可能被背景直线保护抵消）"
+    if stats["max"] > 2 * e:
+        return False, f"最大位移 {stats['max']:.1f}px，超过期望 2 倍"
+    return True, ""
+
+
+def slim(image, faces, strength=1.0, check=True):
+    out, notes = image, []
     for f in faces:
         amt, why = need(f, image, strength)
-        notes.append(why)
         if amt <= 0:
+            notes.append(why)
             continue
-        pts = f.points
-        fw = float(np.linalg.norm(pts[454] - pts[234]))
-        radius = fw * 0.22
-        # 局部区域：脸周围 0.6 个脸宽
-        x0, y0 = (pts.min(axis=0) - fw * 0.6).astype(int)
-        x1, y1 = (pts.max(axis=0) + fw * 0.6).astype(int)
-        x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, W), min(y1, H)
-        dx = np.zeros((y1 - y0, x1 - x0), np.float32)
-        dy = np.zeros_like(dx)
-        xs, ys = np.meshgrid(np.arange(x0, x1, dtype=np.float32), np.arange(y0, y1, dtype=np.float32))
-        # 两侧可见半宽（鼻尖到脸缘）分配位移
-        nose = pts[4]
-        half_l = float(np.linalg.norm(pts[234] - nose))
-        half_r = float(np.linalg.norm(pts[454] - nose))
-        for idx, half in ((_JAW_L, half_l), (_JAW_R, half_r)):
-            shift = fw * MAX_SHIFT * amt * (2 * half / (half_l + half_r)) / 2   # 相邻推点半径重叠，合计约 2 倍
-            for i in idx:
-                p = pts[i]
-                v = nose - p
-                v = v / (np.linalg.norm(v) + 1e-6) * shift
-                t = np.clip(((xs - p[0]) ** 2 + (ys - p[1]) ** 2) / radius ** 2, 0, 1)
-                wgt = (1 - t) ** 2
-                dx -= wgt * v[0]
-                dy -= wgt * v[1]
-        gray = cv2.cvtColor(out[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
-        guard = _line_guard(gray, radius)
-        # 脸部轮廓内部（皮肤上不会有要保护的直线）不衰减
-        hull = cv2.convexHull((pts - [x0, y0]).astype(np.int32))
-        inside = np.zeros(gray.shape, np.uint8)
-        cv2.fillConvexPoly(inside, hull, 1)
-        guard = np.maximum(guard, cv2.GaussianBlur(inside.astype(np.float32), (0, 0), radius * 0.2))
-        mx, my = xs + dx * guard, ys + dy * guard
-        patch = cv2.remap(out, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REFLECT)
-        out = out.copy()
-        out[y0:y1, x0:x1] = patch
+        fw = float(np.linalg.norm(f.points[454] - f.points[234]))
+        warped, stats = warp_face(out, f, amt)
+        if check:
+            ok, reason = _check(stats)
+            if not ok:
+                notes.append(f"{why} → 检查不通过，回退（{reason}）")
+                continue
+        out = warped
+        notes.append(why)
     return out, notes

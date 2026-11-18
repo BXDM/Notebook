@@ -361,7 +361,7 @@ class Retouch(Module):
 
 class Slim(Module):
     """自适应瘦脸（scripts/slim.py）：只瘦确实显大的脸。几何操作，放在所有像素处理之后。
-    --slim 是强度上限（默认 1）；0 关闭。R10 配置也做（用户 2026-11-18 定：瘦脸是新能力，不属于 1.2 设定）。"""
+    可选模块，默认关闭（验证中，见路线图）：--slim 1 打开；R10 配置同样适用。"""
     name, region, order, geometry = "瘦脸", "person", 90, True
 
     def plan(self, ctx):
