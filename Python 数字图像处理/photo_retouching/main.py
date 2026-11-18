@@ -25,6 +25,7 @@ from scripts.learned_denoise import smart_denoise
 from scripts.dodge_burn import dodge_burn
 from scripts.face import detect_faces
 from scripts.hands import hand_mask
+from scripts.light_enhance import light_enhance
 from scripts.frequency_separation import frequency_separation
 from scripts.preprocess import preprocess_image
 from scripts.save_image import save_image
@@ -146,6 +147,13 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     # 美白
     image = on_person(lambda c: whiten_skin(c, masks.tone, whiten_amount(c, masks, opts.whiten)))
     stages["whiten"] = image
+    # 光影增强（人像配置，按条件触发：平脸才塑形、背景轻压暗、白天户外有高光才加柔辉；不造新光源）
+    if profile != "r10" and faces and opts.light > 0:
+        from scripts.analyze import ev100 as _ev100
+        image, light_note = light_enhance(image, masks, (x0, y0, x1, y1),
+                                          _ev100(read_exif(path)) if path else None, opts.light)
+        hue_note += light_note
+    stages["light"] = image
     # 非皮肤区域降噪（夜景衣服、背景的斑驳噪点），放在锐化前
     skin_full = np.zeros((h, w), np.float32)
     skin_full[y0:y1, x0:x1] = masks.skin
@@ -186,6 +194,7 @@ def main():
                     help="配置：auto 按相机型号选（Canon EOS R10 → r10，保持 1.2 设定；其他 → portrait，含人像曝光校正）")
     ap.add_argument("--exposure", type=float, default=1.0, help="以脸为基准的曝光校正强度，0 关闭（默认 1）")
     ap.add_argument("--target", type=float, default=58.0, help="脸部目标亮度 L*（默认 58）")
+    ap.add_argument("--light", type=float, default=1.0, help="光影增强强度，0 关闭（人像配置，按条件自动触发）")
     ap.add_argument("--fill", type=float, default=0.5, help="强侧光时脸部暗面补光强度 0~1（人像配置，默认 0.5）")
     ap.add_argument("--skin-hue", type=float, default=0.6, help="肤色色相校正强度 0~1（人像配置，默认 0.6；R10 配置不做）")
     ap.add_argument("--deveil", type=float, default=0.8, help="去眩光强度 0~1，0 关闭（默认 0.8，脸周没有抬灰时自动跳过）")
