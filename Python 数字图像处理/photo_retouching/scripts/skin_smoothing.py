@@ -76,7 +76,7 @@ def _soften_glints(img, masks, scale, keep=0.35):
     return img - (tophat * (1 - keep) * w)[..., None]
 
 
-def texture_balance(image, masks, scale, strength=0.5, ref_pct=40, lo=1.3, span=1.2):
+def texture_balance(image, masks, scale, strength=0.5, ref_pct=40, lo=1.3, span=1.2, features=None):
     """局部肤质平衡：同一张脸上，局部纹理（高频 + 中频，皮肤内）能量比全脸参考（第 ref_pct 百分位）
     高出 lo 倍以上的地方，再按比例压细节，最多压 strength。低频（肤色、光影、腮红）不动。
     针对“一侧脸（远离镜头、贴着散发的一侧）比另一侧粗 2~3 倍，统一的轻磨皮修完仍然糙”：
@@ -94,6 +94,12 @@ def texture_balance(image, masks, scale, strength=0.5, ref_pct=40, lo=1.3, span=
     ref = float(np.percentile(energy[face], ref_pct))
     t = np.clip((energy / max(ref, 1e-3) - lo) / span, 0, 1)
     k = strength * t * t * (3 - 2 * t) * masks.skin
+    # 五官、鼻孔周围的交界带（1/20 脸宽）不动：鼻翼、眼周、唇边的明暗是结构。不这样做时鼻孔保护区外的
+    # 鼻翼阴影被压平、保护区里没动，鼻孔周围出现一圈硬边（572213）。发丝旁不设交界带——淡化贴脸的细发丝正是这一步要的
+    if features is not None and features.any():
+        dist = cv2.distanceTransform((features == 0).astype(np.uint8), cv2.DIST_L2, 5)
+        t2 = np.clip(1 - dist / max(scale / 20, 1.0), 0, 1)
+        k = k * (1 - t2 * t2 * (3 - 2 * t2))
     out = img - detail * k[..., None]
     share = float((k[face] > 0.1 * strength).mean())
     return np.clip(out + 0.5, 0, 255).astype(np.uint8), f"，肤质平衡：{share:.0%} 的脸部皮肤偏粗（参考起伏 {ref:.1f}）"

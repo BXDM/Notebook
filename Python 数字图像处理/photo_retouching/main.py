@@ -147,7 +147,11 @@ def process_image(image, opts, full_masks=False, iso=None, path=None, profile="p
     # 局部肤质平衡（人像配置）：一侧脸（远离镜头、贴着散发）比另一侧粗 2~3 倍时，只在偏粗处补压细节
     if profile != "r10" and faces and opts.balance > 0:
         notes = []
-        image = on_person(lambda c: (lambda r: notes.append(r[1]) or r[0])(texture_balance(c, masks, scale, opts.balance)))
+        from engine.modules.core import feature_mask
+        from engine.context import Person
+        feats = feature_mask(Person(roi, sub_faces, scale, hands, masks))
+        image = on_person(lambda c: (lambda r: notes.append(r[1]) or r[0])(
+            texture_balance(c, masks, scale, opts.balance, features=feats)))
         hue_note += notes[0]
     stages["smooth"] = image
     # 美白

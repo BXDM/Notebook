@@ -39,6 +39,7 @@ _LOWER_LIDS = [[33, 7, 163, 144, 145, 153, 154, 155, 133], [263, 249, 390, 373, 
 class Face:
     box: tuple                  # (x, y, w, h)，有关键点时按 Haar 框的比例换算，便于各步共用参数
     points: np.ndarray = None   # (478, 2) 像素坐标；Haar 模式下为 None
+    depth: np.ndarray = None    # (478,) 相对深度，与 x 同尺度（像素）；用于不受转头影响的脸型度量
 
     def hull(self, part):
         return cv2.convexHull(self.points[_parts[part]].astype(np.int32))
@@ -154,6 +155,7 @@ def detect_faces(image, use_landmarks=True):
             result = landmarker.detect(mp.Image(image_format=mp.ImageFormat.SRGB, data=tile))
             for lms in result.face_landmarks:
                 pts = np.array([(tx + p.x * tw, ty + p.y * th) for p in lms], np.float32)
+                depth = np.array([p.z * tw for p in lms], np.float32)
                 oval = pts[_parts["oval"]]
                 x0, y0 = oval.min(axis=0)
                 x1, y1 = oval.max(axis=0)
@@ -167,7 +169,7 @@ def detect_faces(image, use_landmarks=True):
                 by = y0 + (y1 - y0) * 0.08
                 box = (int(cx - bw / 2), int(by), int(bw), int(bw))
                 if all(_iou(box, f.box) < 0.3 for f in faces):
-                    faces.append(Face(box, pts))
+                    faces.append(Face(box, pts, depth))
     return faces
 
 

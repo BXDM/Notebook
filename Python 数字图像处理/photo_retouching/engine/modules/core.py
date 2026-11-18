@@ -310,6 +310,19 @@ class Blemish(Module):
         return Report(self.name, ran=True, notes=f"检出 {len(found)}，处理 {n}")
 
 
+def feature_mask(p):
+    """五官 + 鼻孔（人物区域坐标，0/255），肤质平衡在它们周围留交界带。"""
+    from scripts.face import nostril_parts_mask
+    shape = p.masks.skin.shape
+    m = np.zeros(shape, np.uint8)
+    for f in p.faces:
+        if f.points is None:
+            continue
+        m |= f.feature_mask(shape, grow=f.box[2] // 60)
+        m |= nostril_parts_mask(f, shape, grow=f.box[2] // 80)
+    return m
+
+
 class Retouch(Module):
     """补光、匀肤、Dodge & Burn、磨皮、局部肤质平衡、美白（顺序与 1.x 相同）。"""
     name, region, order = "精修", "skin", 45
@@ -338,7 +351,7 @@ class Retouch(Module):
         step(lambda c: dodge_burn(c, m, p.faces, p.scale, o.dodge_burn, o.eye), "dodge_burn")
         step(lambda c: skin_smoothing(c, m, p.scale, o.smooth, o.grain), None)
         if not r10 and o.balance > 0:
-            crop, n = texture_balance(p.crop(ctx.image), m, p.scale, o.balance)
+            crop, n = texture_balance(p.crop(ctx.image), m, p.scale, o.balance, features=feature_mask(p))
             ctx.update(p.paste(ctx.image, crop), None)
             notes.append(n.lstrip("，"))
         ctx.update(ctx.image, "smooth")
@@ -347,18 +360,24 @@ class Retouch(Module):
 
 
 class Slim(Module):
+    """自适应瘦脸（scripts/slim.py）：只瘦确实显大的脸。几何操作，放在所有像素处理之后。
+    --slim 是强度上限（默认 1）；0 关闭。R10 配置保持 1.2（--slim 默认 0 时不瘦）。"""
     name, region, order, geometry = "瘦脸", "person", 90, True
 
     def plan(self, ctx):
-        if ctx.faces and ctx.popts.slim > 0:
-            return Request(goal="slim"), ""
-        return None, "关闭" if ctx.faces else "没有人脸"
+        if not ctx.faces:
+            return None, "没有人脸"
+        if ctx.profile == "r10" or ctx.opts.slim <= 0:
+            return None, "关闭"
+        return Request(goal="slim", preserve=["face_structure", "background_lines"]), ""
 
     def run(self, ctx, req):
-        from scripts.warping import slim_face
-        p = ctx.person
-        ctx.update(p.paste(ctx.image, slim_face(p.crop(ctx.image), p.faces, ctx.popts.slim)), "slim")
-        return Report(self.name, ran=True, notes=f"强度 {ctx.popts.slim}")
+        from scripts.slim import slim
+        image, notes = slim(ctx.image, ctx.faces, ctx.opts.slim)
+        if image is ctx.image:
+            return Report(self.name, ran=False, skipped="；".join(notes))
+        ctx.update(image, "slim", invalidates="all")
+        return Report(self.name, ran=True, notes="；".join(notes))
 
 
 def default_modules():

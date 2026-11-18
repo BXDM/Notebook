@@ -32,6 +32,8 @@ def parse(argv):
     ap.add_argument("-o", "--output", help="输出文件（单张）或目录（批量），默认 output/")
     ap.add_argument("--mode", choices=["engine", "main", "auto"], default="engine",
                     help="engine：按分析结果自动选模块（默认）；main/auto：兼容模式，与 1.x 对应脚本输出一致")
+    ap.add_argument("--slim", type=float, default=1.0,
+                    help="自适应瘦脸强度上限，0 关闭（默认 1；只瘦确实显大的脸，本来就瘦、脸小、侧脸大的不动）")
     opts, rest = ap.parse_known_args(argv)
     p_opts, p_rest = M.build_parser(io=False).parse_known_args(rest)
     a_opts, a_rest = A.build_parser(io=False).parse_known_args(rest)
