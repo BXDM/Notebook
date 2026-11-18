@@ -6,9 +6,10 @@
 - 色彩：白平衡与肤色（Color）、风格调色（Grade）
 - 人像：瑕疵（Blemish）、精修（Retouch：补光、匀肤、D&B、磨皮、肤质平衡、美白）、瘦脸（Slim）
 
-执行顺序由 order 决定（编排器排序）。目前沿用 1.x 的分工：有人脸的照片走人像链路（不拉直、不做天空/去雾），
-没人脸的走场景链路；之后按回归结果逐个放开组合。
+执行顺序由 order 决定（编排器排序）。有人脸的照片：人像链路 + 拉直（只纠歪，不做透视校正，免得拉伸身材）
++ 去雾、天空（人物区域受保护）；夜景光线、晚霞、风格调色仍只给没人脸的照片。
 """
+import numpy as np
 from engine.module import Module, Report, Request
 
 # 曝光、去眩光改了亮度：皮肤蒙版要重算（在新亮度上分割），人脸位置、场景类型不变
@@ -23,6 +24,24 @@ def _scene_only(ctx, why="有人脸，走人像链路"):
     return (None, why) if ctx.faces else (Request(goal="scene"), "")
 
 
+def person_prob(ctx):
+    """人物概率图（人像分割，0~1，已羽化），几何改动前一直复用。"""
+    if ctx.get("person_prob") is None:
+        from scripts.light_enhance import _person_mask
+        ctx.put("person_prob", _person_mask(ctx.image))
+    return ctx.get("person_prob")
+
+
+def protect_person(ctx, before, after):
+    """背景类处理（天空、去雾）写回前，把人物区域换回处理前：人物由人像链路负责，背景处理不能改肤色和脸部明暗。
+    分割概率放大 1.3 倍再截断，边缘的发丝也算人物（宁可人物边上留一点没处理的背景，也不让发丝被压暗）。"""
+    pm = person_prob(ctx)
+    if pm is None:
+        return after
+    w = np.clip(pm * 1.3, 0, 1)[..., None]
+    return np.clip(after * (1 - w) + before * w + 0.5, 0, 255).astype(np.uint8)
+
+
 # ---------------- 技术修复 ----------------
 class Geometry(Module):
     name, region, geometry, order = "拉直", "global", True, 10
@@ -30,11 +49,12 @@ class Geometry(Module):
     def plan(self, ctx):
         if not ctx.opts.auto.straighten:
             return None, "关闭"
-        return _scene_only(ctx, "人像不拉直")
+        return Request(goal="straighten"), ""
 
     def run(self, ctx, req):
         from scripts import geometry
-        geo = geometry.estimate(ctx.image, ctx.exif, keystone=ctx.opts.auto.keystone)
+        # 有人脸：只纠左右歪，不做仰拍透视校正（透视校正会把人拉长或压扁）
+        geo = geometry.estimate(ctx.image, ctx.exif, keystone=0.0 if ctx.faces else ctx.opts.auto.keystone)
         ctx.put("geometry", geo)
         if not geo.ok:
             return Report(self.name, ran=False, skipped=geo.reason)
@@ -144,8 +164,6 @@ class Dehaze(Module):
     def plan(self, ctx):
         if ctx.opts.auto.dehaze <= 0:
             return None, "关闭"
-        if ctx.faces:
-            return None, "有人脸，走人像链路"
         if ctx.ev100 is not None and ctx.ev100 < 10:
             return None, f"EV {ctx.ev100:.1f}，不是白天户外"
         return Request(goal="dehaze"), ""
@@ -156,6 +174,8 @@ class Dehaze(Module):
         if not analyze_sky(ctx.image).found:
             return Report(self.name, ran=False, skipped="没有天空（室内或近景）")
         image, how = dehaze(ctx.image, ctx.opts.auto.dehaze)
+        if ctx.faces:
+            image, how = protect_person(ctx, ctx.image, image), how + "（人物区域不动）"
         ctx.update(image, "dehaze")
         return Report(self.name, ran=True, notes=how)
 
@@ -166,13 +186,17 @@ class Sky(Module):
     def plan(self, ctx):
         if ctx.opts.auto.sky <= 0:
             return None, "关闭"
-        return _scene_only(ctx)
+        return Request(goal="sky"), ""
 
     def run(self, ctx, req):
         from scripts.sky import analyze_sky, recover_sky
         o = ctx.opts.auto
         image, sky_w, how = recover_sky(ctx.image, analyze_sky(ctx.image), o.sky, o.sky_darken)
+        if ctx.faces and sky_w is not None:
+            image, how = protect_person(ctx, ctx.image, image), how + "（人物区域不动）"
         ctx.put("sky_weight", sky_w)
+        if sky_w is None:
+            return Report(self.name, ran=False, skipped=how)
         ctx.update(image, "sky")
         return Report(self.name, ran=True, notes=how)
 
