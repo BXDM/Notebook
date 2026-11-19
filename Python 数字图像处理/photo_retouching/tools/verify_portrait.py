@@ -55,7 +55,7 @@ def blemish_points(report, s):
         return []
     pts = []
     for line in open(report, encoding="utf-8"):
-        m = re.match(r"\s+(acne|spot|freckle|mole|mark)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([\d.]+)", line)
+        m = re.match(r"\s+(acne|spot|freckle|mole|mark|bump)\s+(\d+)\s+(\d+)\s+([\d.]+)\s+[-\d.]+\s+[-\d.]+\s+[-\d.]+\s+([\d.]+)", line)
         if m and float(m.group(5)) > 0:
             pts.append((int(m.group(2)) * s, int(m.group(3)) * s, float(m.group(4)) * s))
     return pts

@@ -7,6 +7,12 @@
   freckle 雀斑           小而浅                           -> 按 --freckles 减淡，默认保留
   spot    小色斑/暗斑    其余                             -> 减淡 70%
   mark    痘印           小而浅、但不成“雀斑分布”或偏红    -> 按 marks 减淡（人像配置 0.6；默认 0 = 1.x 行为，仍算雀斑）
+  bump    凸起的痘       色斑/痘印/雀斑旁边有明显高光（鼓起来，受光侧亮）-> 全额修复，修复范围包进高光（人像配置）
+凸起判据：斑点 1.3 倍直径内亮度第 98 百分位比周围环带中位高出 BUMP_HI~BUMP_HI_MAX，且 ≥ 明暗差 × BUMP_RATIO，且周围不是线状结构
+（梯度方向一致性 < BUMP_COH，排除贴脸的细发丝）。
+平的痘印、色斑高光只有 0.3~6；凸起的痘 13~23（富士 X-H2 模特下巴 6 张、762816 下巴）。
+被归成色斑的痣、饰品反光、贴脸手指、贴脸发丝、发丝交叉、腮红边缘都试出来过，分别由暗部彩度、高光上限、
+大小与比例、方向一致性、高光信噪比与完整性排除（见常量注释）。
 “雀斑分布”：小而浅的斑点 ≥ 6 个、鼻梁两侧都有且较少一侧 ≥ 较多一侧的 30%——真雀斑（含妆面画的雀斑）成片对称分布，
 算身份特征保留；普通人的痘印、小色斑零散、常集中在一侧（2026-11-19 IMG_5870：10 个“雀斑”有 9 个在同一侧脸颊），
 按痘印减淡。成片雀斑里偏红的（红度差 ≥ MARK_RED）也按痘印。
@@ -137,6 +143,16 @@ def _heal(img, high, region, blob, cand, d, weight):
     img[Y0:Y1, X0:X1] = roi * (1 - alpha) + healed * alpha
 
 
+BUMP_HI = 8.0
+BUMP_HI_MAX = 40.0   # 高光太强是金属饰品反光（耳环、发饰 61~75），皮肤上的痘只有 13~23
+BUMP_RATIO = 0.6     # 高光 / 明暗差：凸起痘 0.65~1.33（0777 最低）；贴脸手指 0.58。痣 0.64 和 0777 分不开，靠彩度
+BUMP_CHROMA = 0.95   # 暗部核心彩度 / 环带彩度：凸起痘的暗部是阴影，彩度不降（1.11~1.28）；痣是色素，发灰（0917 为 0.84）
+BUMP_MAX_D = 1 / 30  # 斑点直径上限（脸宽的比例）：凸起痘 0.008~0.024；贴脸手指、腮红块、鼻翼纹理 ≥0.038
+BUMP_SNR = 2.4       # 高光 / 环带起伏：凸起痘 2.5~10.7（0777 最低）；发丝交叉处 2.2（细节纹理多的地方高光不算数）
+BUMP_COH = 0.72      # 斑点周围 3 倍直径内灰度梯度的方向一致性（结构张量相干度）超过这个 → 线状结构（贴脸细发丝），
+                     # 不算凸起。实测：凸起痘 0.56~0.63，小红点 0.34，发丝 0.78（238293，仅一例）。
+                     # 长短轴比（痘的月牙阴影也细长：0777 为 2.77、发丝 3.13）和“沿长轴延伸仍发暗”（下巴轮廓阴影干扰、
+                     # 细发丝采样不到）都试过，分不开
 MARK_MIN_PATTERN = 6
 MARK_RED = 3.0
 
@@ -205,7 +221,8 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
     # 去掉大尺度明暗（侧光、脸颊转折）后的亮度细节，用来衡量斑点周围皮肤的起伏
     L_detail = L - cv2.GaussianBlur(L, (0, 0), scale / 25)
     found, todo = [], []
-    weights = {"acne": 1.0, "spot": 0.7, "freckle": float(freckles), "mole": 1.0 if moles else 0.0, "mark": float(marks)}
+    weights = {"acne": 1.0, "spot": 0.7, "freckle": float(freckles), "mole": 1.0 if moles else 0.0, "mark": float(marks),
+               "bump": 1.0}
     H, W = L.shape
     for bx, by, bw, bh, mask, center, area in _candidates(dark, red, inner, t_dark, t_red,
                                                           min_area, max_area, trace):
@@ -242,16 +259,52 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
                 trace.append((center, f"处于阴影/褶皱中 spread={spread:.2f}"))
             continue
         found.append(Blemish(kind, center, d / 2, dL, da, ring_std, weights[kind]))
-        todo.append((y0, y1, x0, x1, blob, d))
+        hl = None
+        if marks > 0 and kind in ("spot", "freckle"):
+            # 凸起：斑点附近的高光（受光侧鼓起），连同高光一起修
+            cxl, cyl = center[0] - x0, center[1] - y0
+            yy, xx = np.ogrid[:y1 - y0, :x1 - x0]
+            disk = np.hypot(xx - cxl, yy - cyl) <= 1.3 * d
+            base = float(np.median(Lr[ring]))
+            hi = float(np.percentile(Lr[disk], 98)) - base
+            coh = 0.0
+            if hi >= BUMP_HI:
+                r3 = int(3 * d) + 2
+                g = cv2.cvtColor(image[max(int(center[1]) - r3, 0):int(center[1]) + r3,
+                                       max(int(center[0]) - r3, 0):int(center[0]) + r3], cv2.COLOR_BGR2GRAY).astype(np.float32)
+                gx, gy = cv2.Sobel(g, cv2.CV_32F, 1, 0), cv2.Sobel(g, cv2.CV_32F, 0, 1)
+                ev = np.linalg.eigvalsh(np.array([[np.sum(gx * gx), np.sum(gx * gy)], [np.sum(gx * gy), np.sum(gy * gy)]]))
+                coh = float((ev[1] - ev[0]) / (ev[1] + ev[0] + 1e-6))
+            chroma_ratio = 0.0
+            if hi >= BUMP_HI:
+                labw = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2LAB).astype(np.float32)
+                chroma = np.hypot(labw[..., 1] - 128, labw[..., 2] - 128)
+                core_m = (blob > 0) & (Lr <= np.percentile(Lr[blob > 0], 30))
+                if core_m.any():
+                    chroma_ratio = float(chroma[core_m].mean() / max(chroma[ring].mean(), 1e-6))
+                if trace is not None:
+                    trace.append((center, f"凸起候选 hi={hi:.1f} 比例={hi / max(dL, 1e-6):.2f} coh={coh:.2f} "
+                                          f"核心彩度比={chroma_ratio:.2f} 信噪={hi / max(ring_std, 1e-6):.1f} d/脸={d / scale:.3f}"))
+            if (BUMP_HI <= hi <= BUMP_HI_MAX and hi >= BUMP_RATIO * dL and coh < BUMP_COH
+                    and chroma_ratio >= BUMP_CHROMA and d <= scale * BUMP_MAX_D and hi >= BUMP_SNR * ring_std):
+                hl = (disk & (Lr > base + 0.5 * hi) & (region[y0:y1, x0:x1] > 0)).astype(np.uint8)
+                # 高光要是一整块（鼓包的受光面）；碎成几块的是纹理
+                if cv2.connectedComponents(hl)[0] - 1 == 1:
+                    hl = hl * 255
+                else:
+                    hl = None
+        todo.append((y0, y1, x0, x1, blob if hl is None else (blob | hl), d, hl is not None))
     # 痘印：小而浅、但不成雀斑分布（或偏红）的，从“雀斑”改判为痘印
     if marks > 0:
         fr = [b for b in found if b.kind == "freckle"]
         pattern = _freckle_pattern(fr, faces)
         for i, b in enumerate(found):
-            if b.kind == "freckle" and (not pattern or b.da >= MARK_RED):
+            if todo[i][6]:
+                found[i] = Blemish("bump", b.center, b.radius, b.dL, b.da, b.ring_std, weights["bump"])
+            elif b.kind == "freckle" and (not pattern or b.da >= MARK_RED):
                 found[i] = Blemish("mark", b.center, b.radius, b.dL, b.da, b.ring_std, weights["mark"])
     # 统一修复（顺序与检出顺序相同：不开 marks 时与逐个修复的旧行为逐像素一致）
-    for b, (y0, y1, x0, x1, blob, d) in zip(found, todo):
+    for b, (y0, y1, x0, x1, blob, d, _) in zip(found, todo):
         if b.weight > 0:
             full = np.zeros((H, W), np.uint8)
             full[y0:y1, x0:x1] = blob
