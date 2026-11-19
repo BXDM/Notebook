@@ -12,7 +12,8 @@ REGIONS = {
     "左脸颊": 50, "右脸颊": 280, "鼻翼": 129, "发际线": 10,
     "眼周": 145, "嘴角": 61, "下颌": 172,
 }
-KIND_COLORS = {"acne": (0, 0, 255), "spot": (0, 200, 255), "freckle": (255, 200, 0), "mole": (255, 0, 255)}
+KIND_COLORS = {"acne": (0, 0, 255), "spot": (0, 200, 255), "freckle": (255, 200, 0), "mole": (255, 0, 255),
+               "mark": (0, 255, 0)}
 
 
 def mask_overlay(image, masks):
@@ -85,7 +86,7 @@ def write_debug(out_dir, stem, stages, masks, blemishes, faces, scale, params):
     with open(os.path.join(d, "report.txt"), "w", encoding="utf-8") as fh:
         fh.write(f"蒙版方式: {masks.method}\n人脸: {len(faces)}，参考尺寸(脸宽): {scale:.0f}px\n")
         fh.write("瑕疵（检出/处理）: " + "，".join(f"{k} {counts[k]}/{fixed[k]}" for k in KIND_COLORS) + "\n")
-        fh.write("颜色: acne 红, spot 橙, freckle 蓝, mole 紫；粗圈=已处理，细圈=保留\n\n参数:\n")
+        fh.write("颜色: acne 红, spot 橙, freckle 蓝, mole 紫, mark（痘印）绿；粗圈=已处理，细圈=保留\n\n参数:\n")
         for k, v in params.items():
             fh.write(f"  {k} = {v}\n")
         fh.write("\n瑕疵明细 (kind, x, y, 半径, dL, da, 周围起伏, 强度):\n")

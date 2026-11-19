@@ -6,6 +6,10 @@
   mole    痣             很暗且有一定大小                 -> 默认保留（--moles 去除）
   freckle 雀斑           小而浅                           -> 按 --freckles 减淡，默认保留
   spot    小色斑/暗斑    其余                             -> 减淡 70%
+  mark    痘印           小而浅、但不成“雀斑分布”或偏红    -> 按 marks 减淡（人像配置 0.6；默认 0 = 1.x 行为，仍算雀斑）
+“雀斑分布”：小而浅的斑点 ≥ 6 个、鼻梁两侧都有且较少一侧 ≥ 较多一侧的 30%——真雀斑（含妆面画的雀斑）成片对称分布，
+算身份特征保留；普通人的痘印、小色斑零散、常集中在一侧（2026-11-19 IMG_5870：10 个“雀斑”有 9 个在同一侧脸颊），
+按痘印减淡。成片雀斑里偏红的（红度差 ≥ MARK_RED）也按痘印。
 修复：低频用 inpaint 补平，高频纹理从邻近干净皮肤拷贝过来（类似修复画笔），避免出现光滑补丁。
 """
 from dataclasses import dataclass
@@ -133,7 +137,22 @@ def _heal(img, high, region, blob, cand, d, weight):
     img[Y0:Y1, X0:X1] = roi * (1 - alpha) + healed * alpha
 
 
-def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, moles=False, trace=None):
+MARK_MIN_PATTERN = 6
+MARK_RED = 3.0
+
+
+def _freckle_pattern(found, faces):
+    """小而浅的斑点是否成“雀斑分布”（够多、鼻梁两侧都有）。"""
+    if len(found) < MARK_MIN_PATTERN:
+        return False
+    f = next((q for q in faces if q.points is not None), None)
+    mid = float(f.points[1][0]) if f is not None else float(np.median([b.center[0] for b in found]))
+    left = sum(b.center[0] < mid for b in found)
+    right = len(found) - left
+    return min(left, right) >= max(2, 0.3 * max(left, right))
+
+
+def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, moles=False, trace=None, marks=0.0):
     """返回 (修复后图像, [Blemish, ...])。sensitivity 越大检出越多，0 关闭。
 
     trace 传入 list 时记录每个被排除的候选及原因，用于调参。
@@ -185,8 +204,8 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
     high = img - cv2.GaussianBlur(img, (0, 0), max(1.0, scale / 250))
     # 去掉大尺度明暗（侧光、脸颊转折）后的亮度细节，用来衡量斑点周围皮肤的起伏
     L_detail = L - cv2.GaussianBlur(L, (0, 0), scale / 25)
-    found = []
-    weights = {"acne": 1.0, "spot": 0.7, "freckle": float(freckles), "mole": 1.0 if moles else 0.0}
+    found, todo = [], []
+    weights = {"acne": 1.0, "spot": 0.7, "freckle": float(freckles), "mole": 1.0 if moles else 0.0, "mark": float(marks)}
     H, W = L.shape
     for bx, by, bw, bh, mask, center, area in _candidates(dark, red, inner, t_dark, t_red,
                                                           min_area, max_area, trace):
@@ -223,8 +242,18 @@ def remove_blemishes(image, masks, faces, scale, sensitivity=1.0, freckles=0.0, 
                 trace.append((center, f"处于阴影/褶皱中 spread={spread:.2f}"))
             continue
         found.append(Blemish(kind, center, d / 2, dL, da, ring_std, weights[kind]))
-        if weights[kind] > 0:
+        todo.append((y0, y1, x0, x1, blob, d))
+    # 痘印：小而浅、但不成雀斑分布（或偏红）的，从“雀斑”改判为痘印
+    if marks > 0:
+        fr = [b for b in found if b.kind == "freckle"]
+        pattern = _freckle_pattern(fr, faces)
+        for i, b in enumerate(found):
+            if b.kind == "freckle" and (not pattern or b.da >= MARK_RED):
+                found[i] = Blemish("mark", b.center, b.radius, b.dL, b.da, b.ring_std, weights["mark"])
+    # 统一修复（顺序与检出顺序相同：不开 marks 时与逐个修复的旧行为逐像素一致）
+    for b, (y0, y1, x0, x1, blob, d) in zip(found, todo):
+        if b.weight > 0:
             full = np.zeros((H, W), np.uint8)
             full[y0:y1, x0:x1] = blob
-            _heal(img, high, region, full, cand, d, weights[kind])
+            _heal(img, high, region, full, cand, d, b.weight)
     return np.clip(img + 0.5, 0, 255).astype(np.uint8), found

@@ -302,7 +302,10 @@ class Blemish(Module):
         from dataclasses import replace
         from scripts.blemish import remove_blemishes
         p, o = ctx.person, ctx.popts
-        crop, found = remove_blemishes(p.crop(ctx.image), p.masks, p.faces, p.scale, o.blemish, o.freckles, o.moles)
+        # 人像配置：零散、偏红的小斑点按痘印减淡 60%（R10 配置保持 1.x：仍算雀斑、保留）
+        marks = 0.0 if ctx.profile == "r10" else 0.6
+        crop, found = remove_blemishes(p.crop(ctx.image), p.masks, p.faces, p.scale, o.blemish, o.freckles, o.moles,
+                                       marks=marks)
         x0, y0 = p.roi[:2]
         ctx.put("blemishes", [replace(b, center=(b.center[0] + x0, b.center[1] + y0)) for b in found])
         ctx.update(p.paste(ctx.image, crop), "blemish")
